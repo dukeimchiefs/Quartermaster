@@ -99,7 +99,10 @@ All three solvers import constraint definitions from here. Single source of trut
 build_full_schedule(roster, year, preferences) -> Schedule
 repair_schedule(current_schedule, open_shift, sick_resident) -> list[SwapProposal]
 revise_schedule(current_schedule, perturbations) -> Schedule
+recommend_swaps(current_schedule, open_shift, candidates=None) -> list[RankedSwapProposal]
 ```
+
+`recommend_swaps` is not a fourth solver — it's an `llm/tools.py` entry point that calls `repair_schedule()` and ranks/explains the resulting candidates in prose, for chief-facing "what's my best option here" queries rather than only reacting to a call-out event. Same rule as everywhere else: the solver produces the candidates, the LLM only ranks and narrates them.
 
 ---
 
@@ -112,6 +115,7 @@ A single local instruct model handles all natural-language work. Do **not** main
 - Parses free-text call-outs ("Sarah is out tomorrow, possibly Thursday — flu")
 - Translates between user intent and solver inputs / outputs
 - Explains why a swap is infeasible (translates solver's infeasibility output into prose)
+- Recommends and ranks candidate swaps/coverage pulls with rationale, on request — not just reactively on call-out
 - Drafts communications (pages, Slack messages, emails to PD)
 - Summarizes coverage and changes
 

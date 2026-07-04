@@ -1,0 +1,7 @@
+sqlalchemy>=2.0
+pytest>=8.0
+
+# Deferred — add only after a network/telemetry audit (see CLAUDE.md):
+# ortools       # solver/full_schedule.py, solver/repair.py, solver/warm_start.py
+# streamlit     # app/
+# ollama        # llm/client.py

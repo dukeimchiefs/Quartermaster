@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+*.db
+*.sqlite3
+.DS_Store
+
+# Real, live, PII-bearing roster data synced from Duke OneDrive.
+# Never read from, written to, or used as a data source by this repo.
+Resident_Schedules/
