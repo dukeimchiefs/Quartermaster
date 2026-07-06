@@ -1,7 +1,15 @@
 sqlalchemy>=2.0
 pytest>=8.0
 
+# Audited 2026-07-04 (see CLAUDE.md's dependency guardrail): CP-SAT
+# (ortools.sat.python.cp_model) is a fully local native solver — no network
+# calls. The only network-capable code in the package is the opt-in
+# ortools.math_opt.python.ipc.remote_http_solve helper, which POSTs to
+# https://optimization.googleapis.com and requires an explicit API key to
+# invoke. It is unrelated to CP-SAT and this codebase must never import or
+# call it.
+ortools>=9.0
+
 # Deferred — add only after a network/telemetry audit (see CLAUDE.md):
-# ortools       # solver/full_schedule.py, solver/repair.py, solver/warm_start.py
 # streamlit     # app/
 # ollama        # llm/client.py
