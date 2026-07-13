@@ -31,8 +31,16 @@ streamlit>=1.59
 # env vars OLLAMA_REMOTES/OLLAMA_NO_CLOUD) as of v0.31.1 — this is an
 # outbound path that violates CLAUDE.md's no-cloud-inference constraint
 # unless explicitly disabled. The server MUST be started with
-# OLLAMA_NO_CLOUD=1 (llm/client.py checks this at import time and refuses
-# to run otherwise) and models pulled must be plain local tags (e.g.
-# "llama3.1:8b"), never a "-cloud" suffixed tag, which routes to
-# ollama.com regardless of OLLAMA_NO_CLOUD.
+# OLLAMA_NO_CLOUD=1 — always via scripts/run_ollama.sh, never `ollama serve`
+# directly (a client library can't verify its own server's env, so this
+# isn't something llm/client.py can check or enforce). Models pulled must
+# be plain local tags (e.g. "llama3.1:8b"), never a "-cloud" suffixed tag,
+# which routes to ollama.com regardless of OLLAMA_NO_CLOUD — this part
+# llm/client.py does check and reject.
 ollama>=0.6.0
+
+# pandas ships as a transitive dependency of streamlit already, but
+# app/pages/1_Build_Schedule.py imports it directly (to render the built
+# schedule as a pivot table), so it's declared explicitly here too. Pure
+# data-manipulation library, no network code.
+pandas>=2.0
