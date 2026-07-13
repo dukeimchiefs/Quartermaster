@@ -21,5 +21,18 @@ ortools>=9.0
 # that config file.
 streamlit>=1.59
 
-# Deferred — add only after a network/telemetry audit (see CLAUDE.md):
-# ollama        # llm/client.py
+# Audited 2026-07-13: the `ollama` PyPI package (checked v0.6.2) is a thin
+# httpx wrapper — every request goes to the single `host` passed to
+# Client()/AsyncClient(), defaulting to http://127.0.0.1:11434
+# (ollama/_client.py:_parse_host). No other network code in the package.
+#
+# The Ollama *server* itself (separate Homebrew install, not this package)
+# ships a cloud feature (remote inference + web search against ollama.com,
+# env vars OLLAMA_REMOTES/OLLAMA_NO_CLOUD) as of v0.31.1 — this is an
+# outbound path that violates CLAUDE.md's no-cloud-inference constraint
+# unless explicitly disabled. The server MUST be started with
+# OLLAMA_NO_CLOUD=1 (llm/client.py checks this at import time and refuses
+# to run otherwise) and models pulled must be plain local tags (e.g.
+# "llama3.1:8b"), never a "-cloud" suffixed tag, which routes to
+# ollama.com regardless of OLLAMA_NO_CLOUD.
+ollama>=0.6.0

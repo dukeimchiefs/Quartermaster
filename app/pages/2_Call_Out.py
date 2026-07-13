@@ -17,6 +17,7 @@ import streamlit as st
 
 from app.auth import require_chief_auth
 from db.models import Assignment, Block, CallHistory, Resident, Rotation, TimeOff, get_engine, get_session
+from llm.tools import recommend_swaps
 from solver.repair import CurrentSchedule, OpenShift, repair_schedule
 
 require_chief_auth()
@@ -86,6 +87,17 @@ with col2:
 with col3:
     hours = st.number_input("Hours", min_value=1.0, max_value=30.0, value=14.0, step=1.0)
 
+ask_assistant = st.checkbox(
+    "Ask the local assistant to explain each option",
+    help=(
+        "Runs the ranked candidates through the local Ollama model for a "
+        "plain-language rationale (Development Priority #5). The solver's "
+        "ranking and candidate list never change — the assistant only adds "
+        "narration. Requires `ollama serve` running locally; falls back to "
+        "the solver's own reason if it isn't reachable."
+    ),
+)
+
 if st.button("Find coverage", type="primary"):
     open_shift = OpenShift(
         block_id=block.id,
@@ -105,11 +117,23 @@ if st.button("Find coverage", type="primary"):
     else:
         st.success(f"Found {len(proposals)} candidate(s).")
         residents_by_id = {r.id: r for r in schedule.residents}
+
+        narratives_by_id: dict[int, str] = {}
+        if ask_assistant:
+            try:
+                with st.spinner("Asking the local assistant..."):
+                    ranked = recommend_swaps(
+                        schedule, open_shift, sick_resident=sick_resident.id, candidates=proposals
+                    )
+                narratives_by_id = {r.resident_id: r.narrative for r in ranked}
+            except Exception as exc:  # Ollama not running, model not pulled, etc.
+                st.warning(f"Local assistant unavailable, showing solver's own reason instead ({exc}).")
+
         for proposal in proposals:
             candidate = residents_by_id[proposal.resident_id]
             with st.container(border=True):
                 st.markdown(f"**#{proposal.rank} — {candidate.name}** (PGY-{candidate.pgy})")
-                st.caption(proposal.reason)
+                st.caption(narratives_by_id.get(proposal.resident_id, proposal.reason))
                 st.metric(
                     f"Projected hours in {proposal.date}'s rolling window",
                     f"{proposal.projected_window_hours:.1f}h",
