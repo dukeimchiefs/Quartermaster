@@ -209,6 +209,10 @@ def check_rotation_requirements(assignments, rotations, residents) -> list[Viola
     return violations
 
 
+def _overlaps(off, block) -> bool:
+    return off.start_date <= block.end_date and off.end_date >= block.start_date
+
+
 def check_vacation_respect(assignments, time_off, blocks) -> list[Violation]:
     """No assignment may overlap a resident's approved time off."""
     violations: list[Violation] = []
@@ -222,7 +226,7 @@ def check_vacation_respect(assignments, time_off, blocks) -> list[Violation]:
         for off in approved_time_off:
             if off.resident_id != assignment.resident_id:
                 continue
-            if off.start_date <= block.end_date and off.end_date >= block.start_date:
+            if _overlaps(off, block):
                 violations.append(
                     Violation(
                         rule="vacation_respect",
@@ -237,6 +241,27 @@ def check_vacation_respect(assignments, time_off, blocks) -> list[Violation]:
                 )
 
     return violations
+
+
+def blocked_by_approved_leave(resident_id: int, blocks, time_off) -> set[int]:
+    """Block IDs where `resident_id` has approved time off overlapping the
+    block — shared by full_schedule.py (skip creating an assignment variable
+    for these rather than build one and forbid it) and check_vacation_respect
+    above (same overlap definition, so the two can never drift apart)."""
+    return {
+        block.id
+        for block in blocks
+        for off in time_off
+        if off.approved and off.resident_id == resident_id and _overlaps(off, block)
+    }
+
+
+def role_for_pgy(pgy: int) -> str:
+    """PGY-1 residents are interns, PGY-2+ are seniors — this toy program's
+    convention (matches db/seed.py's seed data exactly). A real program
+    might have a more nuanced mapping; this is the single place it would
+    change."""
+    return "intern" if pgy == 1 else "senior"
 
 
 def check_all(*, assignments, residents, rotations, blocks, time_off, call_history) -> list[Violation]:
