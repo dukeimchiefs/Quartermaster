@@ -97,15 +97,27 @@ def _resident_active_during(resident, block) -> bool:
     return True
 
 
-def build_full_schedule(
+@dataclass
+class _BuiltModel:
+    """Everything build_full_schedule and warm_start.revise_schedule share:
+    the CP-SAT model with every hard constraint already added, plus
+    fairness_terms/preference_terms (unweighted — callers scale and combine
+    them, along with any extra terms of their own such as a deviation
+    penalty, into a single model.Minimize(...) call)."""
+
+    model: cp_model.CpModel
+    blocks: list
+    assignment_vars: dict[tuple[int, int, int], cp_model.IntVar]
+    residents_by_id: dict
+    fairness_terms: list
+    preference_terms: list
+
+
+def _build_model(
     roster: Roster,
     year: int,
-    preferences: dict[int, dict[int, float]] | None = None,
-    *,
-    fairness_weight: float = DEFAULT_FAIRNESS_WEIGHT,
-    preference_weight: float = DEFAULT_PREFERENCE_WEIGHT,
-    max_time_in_seconds: float = DEFAULT_MAX_TIME_IN_SECONDS,
-) -> Schedule:
+    preferences: dict[int, dict[int, float]] | None,
+) -> _BuiltModel:
     preferences = preferences or {}
     blocks = sorted((b for b in roster.blocks if b.year == year), key=lambda b: b.block_number)
     if not blocks:
@@ -203,24 +215,39 @@ def build_full_schedule(
         model.AddMinEquality(min_count, counts)
         fairness_terms.append(max_count - min_count)
 
-    model.Minimize(
-        fairness_weight * sum(fairness_terms) - preference_weight * sum(preference_terms)
-        if fairness_terms or preference_terms
-        else 0
+    return _BuiltModel(
+        model=model,
+        blocks=blocks,
+        assignment_vars=assignment_vars,
+        residents_by_id=residents_by_id,
+        fairness_terms=fairness_terms,
+        preference_terms=preference_terms,
     )
 
+
+def _solve_and_extract(
+    built: _BuiltModel,
+    roster: Roster,
+    year: int,
+    *,
+    max_time_in_seconds: float,
+) -> Schedule:
+    """Shared tail end of build_full_schedule and revise_schedule: solve
+    whatever objective the caller already set with model.Minimize(...),
+    extract the chosen assignments, and round-trip them through rules.py
+    before trusting them."""
     solver = cp_model.CpSolver()
     # See memory: CP-SAT's default multi-threaded search hangs in this
     # sandbox. Always single-threaded, same as repair.py.
     solver.parameters.num_search_workers = 1
     solver.parameters.max_time_in_seconds = max_time_in_seconds
-    status = solver.Solve(model)
+    status = solver.Solve(built.model)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         raise InfeasibleScheduleError(
             f"No feasible schedule found for year {year} ({len(roster.residents)} residents, "
-            f"{len(blocks)} blocks, {len(roster.rotations)} rotations). Check rotation capacity "
-            "against roster size, PGY eligibility coverage, and approved time off overlap."
+            f"{len(built.blocks)} blocks, {len(roster.rotations)} rotations). Check rotation "
+            "capacity against roster size, PGY eligibility coverage, and approved time off overlap."
         )
 
     assignments = [
@@ -228,9 +255,9 @@ def build_full_schedule(
             resident_id=resident_id,
             block_id=block_id,
             rotation_id=rotation_id,
-            role=role_for_pgy(residents_by_id[resident_id].pgy),
+            role=role_for_pgy(built.residents_by_id[resident_id].pgy),
         )
-        for (resident_id, block_id, rotation_id), var in assignment_vars.items()
+        for (resident_id, block_id, rotation_id), var in built.assignment_vars.items()
         if solver.Value(var) == 1
     ]
 
@@ -243,14 +270,32 @@ def build_full_schedule(
         assignments=assignments,
         residents=roster.residents,
         rotations=roster.rotations,
-        blocks=blocks,
+        blocks=built.blocks,
         time_off=roster.time_off,
         call_history=[],
     )
     if violations:
         raise AssertionError(
-            f"build_full_schedule produced a schedule rules.py rejects — this is a solver bug, "
+            f"solver produced a schedule rules.py rejects — this is a solver bug, "
             f"not a data problem: {violations}"
         )
 
     return Schedule(year=year, assignments=assignments)
+
+
+def build_full_schedule(
+    roster: Roster,
+    year: int,
+    preferences: dict[int, dict[int, float]] | None = None,
+    *,
+    fairness_weight: float = DEFAULT_FAIRNESS_WEIGHT,
+    preference_weight: float = DEFAULT_PREFERENCE_WEIGHT,
+    max_time_in_seconds: float = DEFAULT_MAX_TIME_IN_SECONDS,
+) -> Schedule:
+    built = _build_model(roster, year, preferences)
+    built.model.Minimize(
+        fairness_weight * sum(built.fairness_terms) - preference_weight * sum(built.preference_terms)
+        if built.fairness_terms or built.preference_terms
+        else 0
+    )
+    return _solve_and_extract(built, roster, year, max_time_in_seconds=max_time_in_seconds)
