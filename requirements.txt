@@ -10,6 +10,16 @@ pytest>=8.0
 # call it.
 ortools>=9.0
 
+# Audited 2026-07-06: Streamlit defaults to phoning home anonymous usage
+# stats (browser.gatherUsageStats=True by default, POSTs are gated by that
+# exact config flag in streamlit/runtime/metrics_util.py) and, on first run
+# with no local credentials file, interactively prompts for an email address
+# that — only if submitted — gets POSTed for a mailing list. Both are
+# disabled in .streamlit/config.toml (gatherUsageStats=false, headless=true,
+# which together fully skip both code paths per
+# streamlit/runtime/credentials.py's check_credentials()). Do not remove
+# that config file.
+streamlit>=1.59
+
 # Deferred — add only after a network/telemetry audit (see CLAUDE.md):
-# streamlit     # app/
 # ollama        # llm/client.py

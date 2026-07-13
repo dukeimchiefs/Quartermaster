@@ -143,6 +143,11 @@ def repair_schedule(
 
     proposals: list[SwapProposal] = []
     solver = cp_model.CpSolver()
+    # CP-SAT defaults to spawning multiple search-worker threads. Problems
+    # this small (one bool var per candidate) gain nothing from parallel
+    # search, and some sandboxed/restricted environments hang indefinitely
+    # on multi-threaded solves, so force single-threaded search explicitly.
+    solver.parameters.num_search_workers = 1
     remaining = dict(live_vars)
     for rank in range(1, min(max_candidates, len(feasible)) + 1):
         status = solver.Solve(model)

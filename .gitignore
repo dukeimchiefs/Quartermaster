@@ -8,3 +8,6 @@ __pycache__/
 # Real, live, PII-bearing roster data synced from Duke OneDrive.
 # Never read from, written to, or used as a data source by this repo.
 Resident_Schedules/
+
+# Real chief-resident passphrase — never commit. See secrets.toml.example.
+.streamlit/secrets.toml

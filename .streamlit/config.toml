@@ -1,0 +1,11 @@
+# Local-only posture per CLAUDE.md's Non-Negotiable Privacy & Governance
+# Constraints ("no telemetry"). Streamlit defaults to sending anonymous
+# usage statistics to Streamlit/Snowflake — disabled below. `headless` also
+# skips the one-time interactive email-collection prompt on first run
+# (audited in requirements.txt) instead of sending anything.
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
