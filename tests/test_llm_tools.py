@@ -1,14 +1,21 @@
 """Tests for llm/client.py and llm/tools.py — Development Priority #5
-(CLAUDE.md): "Ollama integration — single prompt, single tool (the repair
-solver)". These tests never talk to a real Ollama server; recommend_swaps
-takes a fake client double so the suite runs without the (heavy, optional)
-Ollama install.
+("Ollama integration — single prompt, single tool") and #6 ("LLM-driven
+call-out parsing — free-text → structured solver call") from CLAUDE.md.
+These tests never talk to a real Ollama server; recommend_swaps and
+handle_callout_message take a fake client double so the suite runs without
+the (heavy, optional) Ollama install.
 
-The core guarantee under test: no matter what the fake LLM does — calls the
-tool, skips it, or narrates a resident_id the tool never returned — the
-candidate set recommend_swaps returns is always exactly what
-solver.repair.repair_schedule produced (CLAUDE.md's "solver produces the
-candidates, the LLM only ranks and narrates them").
+The core guarantee under test: no matter what the fake LLM does — calls a
+tool, skips it, narrates a resident_id a tool never returned, or fails to
+resolve who/when — the candidate set that comes back is always exactly what
+solver.repair.repair_schedule produced, or nothing at all (CLAUDE.md's
+"solver produces the candidates, the LLM only ranks and narrates them").
+handle_callout_message's ID hand-off between query_schedule_db and
+call_repair_solver happens in plain Python rather than via a second model
+turn — see that function's docstring for why (verified live against
+llama3.1:8b: with both tools registered at once, it would sometimes fire a
+premature call_repair_solver with hallucinated IDs in the same turn as the
+lookup).
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from llm.client import DEFAULT_HOST, OllamaClient, RemoteInferenceBlocked
-from llm.tools import call_repair_solver, recommend_swaps
+from llm.tools import call_repair_solver, handle_callout_message, query_schedule_db, recommend_swaps
 from solver.repair import CurrentSchedule, OpenShift
 
 
@@ -212,3 +219,105 @@ def test_recommend_swaps_falls_back_to_solver_when_model_skips_tool(schedule, op
     assert [r.resident_id for r in results] == [3, 2]
     # no narratives matched (empty from the fake) -> falls back to solver_reason
     assert "resident 3" in results[0].narrative
+
+
+# --- llm/tools.py: query_schedule_db -----------------------------------------
+
+
+def test_query_schedule_db_matches_name_and_date(schedule):
+    matches = query_schedule_db(schedule, name="alice", date="2026-07-10")
+
+    assert len(matches) == 1
+    assert matches[0]["resident_id"] == 1
+    assert matches[0]["block_id"] == 1
+    assert matches[0]["rotation_id"] == 1
+    assert matches[0]["role"] == "senior"
+
+
+def test_query_schedule_db_no_match_for_unknown_name(schedule):
+    assert query_schedule_db(schedule, name="nobody", date="2026-07-10") == []
+
+
+def test_query_schedule_db_no_match_outside_block_date_range(schedule):
+    assert query_schedule_db(schedule, name="alice", date="2026-09-01") == []
+
+
+# --- llm/tools.py: handle_callout_message ------------------------------------
+
+
+class _FakeCalloutClientResolves:
+    """Simulates a model that resolves the lookup on the first try, then
+    narrates the solver's candidates on the second (no-tools) turn."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, *, tools=None, format=None, **kwargs):
+        self.calls += 1
+        if tools:
+            call = _FakeToolCall(
+                function=_FakeFunction(name="query_schedule_db", arguments={"name": "Alice", "date": "2026-07-10"})
+            )
+            return _FakeResponse(message=_FakeMessage(tool_calls=[call]))
+        narratives = {
+            "narratives": [
+                {"resident_id": 3, "narrative": "Carla has the lightest load."},
+                {"resident_id": 2, "narrative": "Brian is next best."},
+            ]
+        }
+        return _FakeResponse(message=_FakeMessage(content=json.dumps(narratives)))
+
+
+class _FakeCalloutClientAmbiguousName:
+    """Simulates a model whose lookup resolves to zero matches, then asks a
+    clarifying question when told so."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, *, tools=None, format=None, **kwargs):
+        self.calls += 1
+        if tools:
+            call = _FakeToolCall(
+                function=_FakeFunction(name="query_schedule_db", arguments={"name": "Zzz", "date": "2026-07-10"})
+            )
+            return _FakeResponse(message=_FakeMessage(tool_calls=[call]))
+        return _FakeResponse(message=_FakeMessage(content="Who exactly do you mean, and what date?"))
+
+
+class _FakeCalloutClientNeverCallsTool:
+    """Simulates a model that responds with plain text instead of resolving
+    who/when at all (e.g. the message was too vague)."""
+
+    def chat(self, messages, *, tools=None, format=None, **kwargs):
+        return _FakeResponse(message=_FakeMessage(content="Who's out, and on what date?"))
+
+
+def test_handle_callout_message_resolves_and_finds_coverage(schedule):
+    result = handle_callout_message(
+        schedule, "Alice is out", today=dt.date(2026, 7, 10), client=_FakeCalloutClientResolves()
+    )
+
+    assert result.resolved is True
+    assert result.sick_resident_id == 1
+    assert [p.resident_id for p in result.proposals] == [3, 2]
+    assert result.proposals[0].narrative == "Carla has the lightest load."
+
+
+def test_handle_callout_message_asks_to_clarify_on_zero_matches(schedule):
+    result = handle_callout_message(
+        schedule, "Zzz is out", today=dt.date(2026, 7, 10), client=_FakeCalloutClientAmbiguousName()
+    )
+
+    assert result.resolved is False
+    assert result.proposals is None
+    assert "?" in result.reply
+
+
+def test_handle_callout_message_asks_to_clarify_when_model_never_looks_up(schedule):
+    result = handle_callout_message(
+        schedule, "someone's out", today=dt.date(2026, 7, 10), client=_FakeCalloutClientNeverCallsTool()
+    )
+
+    assert result.resolved is False
+    assert result.proposals is None

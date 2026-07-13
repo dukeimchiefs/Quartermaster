@@ -17,7 +17,7 @@ import streamlit as st
 
 from app.auth import require_chief_auth
 from db.models import Assignment, Block, CallHistory, Resident, Rotation, TimeOff, get_engine, get_session
-from llm.tools import recommend_swaps
+from llm.tools import handle_callout_message, recommend_swaps
 from solver.repair import CurrentSchedule, OpenShift, repair_schedule
 
 require_chief_auth()
@@ -138,3 +138,40 @@ if st.button("Find coverage", type="primary"):
                     f"Projected hours in {proposal.date}'s rolling window",
                     f"{proposal.projected_window_hours:.1f}h",
                 )
+
+st.divider()
+st.subheader("Or describe it in your own words")
+st.caption(
+    "Development Priority #6 (CLAUDE.md). Parses free text into who/when via "
+    "the local assistant, then always runs the same solver as the form above "
+    "— it never invents a candidate itself. Defaults to a 14h night_call "
+    "shift unless you say otherwise."
+)
+free_text = st.text_area(
+    "What happened?",
+    placeholder='e.g. "Alice is out tomorrow, possibly Thursday too, with the flu"',
+)
+if st.button("Parse & find coverage"):
+    if not free_text.strip():
+        st.warning("Enter a description first.")
+    else:
+        try:
+            with st.spinner("Asking the local assistant..."):
+                result = handle_callout_message(schedule, free_text, today=dt.date.today())
+        except Exception as exc:  # Ollama not running, model not pulled, etc.
+            st.error(f"Local assistant unavailable ({exc}). Use the structured form above instead.")
+        else:
+            if not result.resolved:
+                st.info(result.reply)
+            elif not result.proposals:
+                st.error(result.reply)
+            else:
+                st.success(result.reply)
+                for proposal in result.proposals:
+                    with st.container(border=True):
+                        st.markdown(f"**#{proposal.rank} — {proposal.resident_name}**")
+                        st.caption(proposal.narrative)
+                        st.metric(
+                            "Projected rolling-window hours",
+                            f"{proposal.projected_window_hours:.1f}h",
+                        )
