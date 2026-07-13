@@ -11,6 +11,13 @@ llm/prompts/schedule_builder.md (translating free-text intent into
 preferences, explaining infeasibility in prose) is not wired in yet — this
 page is the structured-form step only, matching how Call Out shipped its
 structured form (Priority #4) well before free-text parsing (Priority #6).
+
+The built schedule is stored in st.session_state, not just rendered inside
+the "Build schedule" button's if-block: Streamlit reruns the whole script
+on every widget interaction, so a "stage for review" button nested inside
+that block would make the outer condition go false on the very rerun meant
+to handle its click. Only one built schedule is staged at a time; building
+again replaces it.
 """
 
 from __future__ import annotations
@@ -111,11 +118,8 @@ if st.button("Build schedule", type="primary"):
             )
     except InfeasibleScheduleError as exc:
         st.error(str(exc))
+        st.session_state.pop("built_schedule_result", None)
     else:
-        residents_by_id = {r.id: r for r in roster.residents}
-        rotations_by_id = {r.id: r for r in roster.rotations}
-        blocks_by_id = {b.id: b for b in roster.blocks}
-
         audit_record(
             actor=get_actor(),
             action="propose_full_schedule",
@@ -130,31 +134,54 @@ if st.button("Build schedule", type="primary"):
                 }
             ),
         )
+        st.session_state["built_schedule_result"] = {
+            "year": year,
+            "assignments": [
+                {
+                    "resident_id": a.resident_id,
+                    "block_id": a.block_id,
+                    "rotation_id": a.rotation_id,
+                    "role": a.role,
+                }
+                for a in schedule.assignments
+            ],
+        }
 
-        st.success(f"Built a schedule with {len(schedule.assignments)} assignments.")
+built_result = st.session_state.get("built_schedule_result")
+if built_result:
+    residents_by_id = {r.id: r for r in roster.residents}
+    rotations_by_id = {r.id: r for r in roster.rotations}
+    blocks_by_id = {b.id: b for b in roster.blocks}
+    result_year = built_result["year"]
 
-        pivot_rows = {}
-        for assignment in schedule.assignments:
-            resident_name = residents_by_id[assignment.resident_id].name
-            block_number = blocks_by_id[assignment.block_id].block_number
-            rotation_name = rotations_by_id[assignment.rotation_id].name
-            pivot_rows.setdefault(resident_name, {})[f"Block {block_number}"] = (
-                f"{rotation_name} ({assignment.role})"
-            )
+    st.success(f"Built a schedule with {len(built_result['assignments'])} assignments for {result_year}.")
 
-        block_columns = [f"Block {b.block_number}" for b in sorted(roster.blocks, key=lambda b: b.block_number) if b.year == year]
-        pivot_df = pd.DataFrame.from_dict(pivot_rows, orient="index", columns=block_columns)
-        pivot_df = pivot_df.reindex(sorted(pivot_df.index))
-        st.dataframe(pivot_df, use_container_width=True)
+    pivot_rows = {}
+    for a in built_result["assignments"]:
+        resident_name = residents_by_id[a["resident_id"]].name
+        block_number = blocks_by_id[a["block_id"]].block_number
+        rotation_name = rotations_by_id[a["rotation_id"]].name
+        pivot_rows.setdefault(resident_name, {})[f"Block {block_number}"] = f"{rotation_name} ({a['role']})"
 
-        st.subheader("Rotation load per resident")
-        load_rows = {}
-        for assignment in schedule.assignments:
-            resident_name = residents_by_id[assignment.resident_id].name
-            rotation_name = rotations_by_id[assignment.rotation_id].name
-            load_rows.setdefault(resident_name, {})[rotation_name] = (
-                load_rows.setdefault(resident_name, {}).get(rotation_name, 0) + 1
-            )
-        load_df = pd.DataFrame.from_dict(load_rows, orient="index").fillna(0).astype(int)
-        load_df = load_df.reindex(sorted(load_df.index))
-        st.dataframe(load_df, use_container_width=True)
+    block_columns = [
+        f"Block {b.block_number}" for b in sorted(roster.blocks, key=lambda b: b.block_number) if b.year == result_year
+    ]
+    pivot_df = pd.DataFrame.from_dict(pivot_rows, orient="index", columns=block_columns)
+    pivot_df = pivot_df.reindex(sorted(pivot_df.index))
+    st.dataframe(pivot_df, use_container_width=True)
+
+    st.subheader("Rotation load per resident")
+    load_rows = {}
+    for a in built_result["assignments"]:
+        resident_name = residents_by_id[a["resident_id"]].name
+        rotation_name = rotations_by_id[a["rotation_id"]].name
+        load_rows.setdefault(resident_name, {})[rotation_name] = (
+            load_rows.setdefault(resident_name, {}).get(rotation_name, 0) + 1
+        )
+    load_df = pd.DataFrame.from_dict(load_rows, orient="index").fillna(0).astype(int)
+    load_df = load_df.reindex(sorted(load_df.index))
+    st.dataframe(load_df, use_container_width=True)
+
+    if st.button("Stage this schedule for review", type="primary"):
+        st.session_state["pending_full_schedule"] = built_result
+        st.success("Staged — go to Review Changes to approve and commit.")

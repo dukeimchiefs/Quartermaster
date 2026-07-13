@@ -3,14 +3,24 @@
 Development Priority #4 (CLAUDE.md): structured form + result display, ahead
 of the LLM-driven free-text path (Priority #6). Reads the live DB, calls
 solver/repair.py, and displays ranked replacement proposals. This page does
-not commit anything — no assignment or call_history row is written.
-Approving/committing a swap is future work (Page 3 / Priority #10).
+not commit anything — no assignment or call_history row is written here.
+Picking a candidate stages it in st.session_state["pending_swap"] for
+Page 3 (Review Changes) to diff and actually commit (Priority #10); only
+one pending swap is held at a time, choosing a new one replaces it.
 
-It does, however, write to audit_log (Priority #7) every time a search
-actually produces (or fails to produce) a proposed swap — CLAUDE.md
-requires every proposed *or* committed change to be logged, not just
-commits. A free-text message that only led to a clarifying question isn't
-a proposal yet, so those aren't logged here.
+It writes to audit_log (Priority #7) every time a search actually produces
+(or fails to produce) a proposed swap — CLAUDE.md requires every proposed
+*or* committed change to be logged, not just commits. A free-text message
+that only led to a clarifying question isn't a proposal yet, so those
+aren't logged here.
+
+Search results are stored in session_state rather than rendered directly
+inside the `if st.button(...)` block: Streamlit reruns the whole script on
+every widget interaction, and a "choose this option" button nested inside
+that block would make the outer condition go false on the very rerun that's
+supposed to handle its click, wiping the results before they can be acted
+on. Keeping computed results in session_state and rendering them in a
+separate, unconditional section avoids that.
 """
 
 from __future__ import annotations
@@ -70,6 +80,21 @@ if not schedule.residents or not schedule.assignments:
 
 rotations_by_id = {r.id: r for r in schedule.rotations}
 blocks_by_id = {b.id: b for b in schedule.blocks}
+residents_by_id = {r.id: r for r in schedule.residents}
+
+
+def _stage_pending_swap(*, sick_resident_id, open_shift_dict, candidate, source: str) -> None:
+    st.session_state["pending_swap"] = {
+        "source": source,
+        "sick_resident_id": sick_resident_id,
+        "sick_resident_name": residents_by_id[sick_resident_id].name,
+        "chosen_resident_id": candidate["resident_id"],
+        "chosen_resident_name": candidate["resident_name"],
+        "open_shift": open_shift_dict,
+        "reason": candidate["reason"],
+    }
+    st.success(f"Staged {candidate['resident_name']} to cover this shift — go to Review Changes to approve.")
+
 
 sick_resident = st.selectbox(
     "Who's out?",
@@ -147,35 +172,56 @@ if st.button("Find coverage", type="primary"):
         ),
     )
 
-    if not proposals:
+    narratives_by_id: dict[int, str] = {}
+    if proposals and ask_assistant:
+        try:
+            with st.spinner("Asking the local assistant..."):
+                ranked = recommend_swaps(schedule, open_shift, sick_resident=sick_resident.id, candidates=proposals)
+            narratives_by_id = {r.resident_id: r.narrative for r in ranked}
+        except Exception as exc:  # Ollama not running, model not pulled, etc.
+            st.warning(f"Local assistant unavailable, showing solver's own reason instead ({exc}).")
+
+    st.session_state["structured_search_result"] = {
+        "sick_resident_id": sick_resident.id,
+        "rotation_name": rotation.name,
+        "role": assignment.role,
+        "block_number": block.block_number,
+        "open_shift": _open_shift_dict(open_shift),
+        "candidates": [
+            {
+                "resident_id": p.resident_id,
+                "resident_name": residents_by_id[p.resident_id].name,
+                "rank": p.rank,
+                "projected_window_hours": p.projected_window_hours,
+                "reason": narratives_by_id.get(p.resident_id, p.reason),
+            }
+            for p in proposals
+        ],
+    }
+
+structured_result = st.session_state.get("structured_search_result")
+if structured_result:
+    candidates = structured_result["candidates"]
+    if not candidates:
         st.error(
-            f"No eligible peer found to cover {rotation.name} ({assignment.role}) "
-            f"in block {block.block_number}."
+            f"No eligible peer found to cover {structured_result['rotation_name']} "
+            f"({structured_result['role']}) in block {structured_result['block_number']}."
         )
     else:
-        st.success(f"Found {len(proposals)} candidate(s).")
-        residents_by_id = {r.id: r for r in schedule.residents}
-
-        narratives_by_id: dict[int, str] = {}
-        if ask_assistant:
-            try:
-                with st.spinner("Asking the local assistant..."):
-                    ranked = recommend_swaps(
-                        schedule, open_shift, sick_resident=sick_resident.id, candidates=proposals
-                    )
-                narratives_by_id = {r.resident_id: r.narrative for r in ranked}
-            except Exception as exc:  # Ollama not running, model not pulled, etc.
-                st.warning(f"Local assistant unavailable, showing solver's own reason instead ({exc}).")
-
-        for proposal in proposals:
-            candidate = residents_by_id[proposal.resident_id]
+        st.success(f"Found {len(candidates)} candidate(s).")
+        for candidate in candidates:
             with st.container(border=True):
-                st.markdown(f"**#{proposal.rank} — {candidate.name}** (PGY-{candidate.pgy})")
-                st.caption(narratives_by_id.get(proposal.resident_id, proposal.reason))
-                st.metric(
-                    f"Projected hours in {proposal.date}'s rolling window",
-                    f"{proposal.projected_window_hours:.1f}h",
-                )
+                candidate_resident = residents_by_id[candidate["resident_id"]]
+                st.markdown(f"**#{candidate['rank']} — {candidate_resident.name}** (PGY-{candidate_resident.pgy})")
+                st.caption(candidate["reason"])
+                st.metric("Projected rolling-window hours", f"{candidate['projected_window_hours']:.1f}h")
+                if st.button(f"Choose {candidate_resident.name}", key=f"choose_structured_{candidate['resident_id']}"):
+                    _stage_pending_swap(
+                        sick_resident_id=structured_result["sick_resident_id"],
+                        open_shift_dict=structured_result["open_shift"],
+                        candidate=candidate,
+                        source="structured",
+                    )
 
 st.divider()
 st.subheader("Or describe it in your own words")
@@ -198,24 +244,11 @@ if st.button("Parse & find coverage"):
                 result = handle_callout_message(schedule, free_text, today=dt.date.today())
         except Exception as exc:  # Ollama not running, model not pulled, etc.
             st.error(f"Local assistant unavailable ({exc}). Use the structured form above instead.")
+            st.session_state.pop("free_text_search_result", None)
         else:
             if not result.resolved:
                 st.info(result.reply)
-            elif not result.proposals:
-                audit_record(
-                    actor=get_actor(),
-                    action="propose_swap",
-                    reason=f'call-out (free text): "{free_text.strip()}"',
-                    details=json.dumps(
-                        {
-                            "free_text": free_text.strip(),
-                            "sick_resident_id": result.sick_resident_id,
-                            "open_shift": _open_shift_dict(result.open_shift),
-                            "candidates": [],
-                        }
-                    ),
-                )
-                st.error(result.reply)
+                st.session_state.pop("free_text_search_result", None)
             else:
                 audit_record(
                     actor=get_actor(),
@@ -237,12 +270,37 @@ if st.button("Parse & find coverage"):
                         }
                     ),
                 )
-                st.success(result.reply)
-                for proposal in result.proposals:
-                    with st.container(border=True):
-                        st.markdown(f"**#{proposal.rank} — {proposal.resident_name}**")
-                        st.caption(proposal.narrative)
-                        st.metric(
-                            "Projected rolling-window hours",
-                            f"{proposal.projected_window_hours:.1f}h",
-                        )
+                st.session_state["free_text_search_result"] = {
+                    "reply": result.reply,
+                    "sick_resident_id": result.sick_resident_id,
+                    "open_shift": _open_shift_dict(result.open_shift),
+                    "candidates": [
+                        {
+                            "resident_id": p.resident_id,
+                            "resident_name": p.resident_name,
+                            "rank": p.rank,
+                            "projected_window_hours": p.projected_window_hours,
+                            "reason": p.narrative,
+                        }
+                        for p in result.proposals
+                    ],
+                }
+
+free_text_result = st.session_state.get("free_text_search_result")
+if free_text_result:
+    if not free_text_result["candidates"]:
+        st.error(free_text_result["reply"])
+    else:
+        st.success(free_text_result["reply"])
+        for candidate in free_text_result["candidates"]:
+            with st.container(border=True):
+                st.markdown(f"**#{candidate['rank']} — {candidate['resident_name']}**")
+                st.caption(candidate["reason"])
+                st.metric("Projected rolling-window hours", f"{candidate['projected_window_hours']:.1f}h")
+                if st.button(f"Choose {candidate['resident_name']}", key=f"choose_freetext_{candidate['resident_id']}"):
+                    _stage_pending_swap(
+                        sick_resident_id=free_text_result["sick_resident_id"],
+                        open_shift_dict=free_text_result["open_shift"],
+                        candidate=candidate,
+                        source="free_text",
+                    )
