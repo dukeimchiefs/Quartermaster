@@ -72,5 +72,16 @@ the whole chain, run against the real server if one is up.
 streamlit run app/main.py
 ```
 
+**Run this from the project root** (i.e. `cd` here first — the command
+above assumes it). Confirmed live: Streamlit resolves `.streamlit/config.toml`
+(the file that disables its default telemetry and interactive email prompt)
+relative to the process's working directory, not the script's location —
+launching from anywhere else silently drops that config and Streamlit falls
+back to its default phone-home behavior, which violates CLAUDE.md's
+no-telemetry constraint. `app/main.py`'s own sys.path fix (needed so
+`from app.auth import ...` resolves at all) doesn't have this problem — it's
+anchored to the script's file location, not the working directory — but the
+telemetry config does.
+
 Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and set
 a real `chief_passphrase` first — see `app/auth.py`.
