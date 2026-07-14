@@ -4,18 +4,6 @@ A fully local (offline / on-prem) tool to help a chief resident build the IM
 residency block schedule, handle call-outs and swaps, and revise the schedule
 mid-cycle. See `CLAUDE.md` for full architecture and design decisions.
 
-## Status
-
-**Prototype.** Governance sign-off from Duke AI/data governance and the GME
-office is pending — this must not influence official schedules until that
-review is complete.
-
-Implemented (Development Priorities #1–#7 in `CLAUDE.md`): DB schema/seed
-data, `rules.py`, the call-out repair solver, the Call-Out Streamlit page
-(structured form + free-text parsing), Ollama tool-calling integration, and
-audit log wiring. `full_schedule.py`, Page 1 (Build Schedule), Page 3
-(Review Changes), and `warm_start.py` (Priorities #8–#11) remain stubbed
-with `NotImplementedError`.
 
 ## PII / data handling
 
