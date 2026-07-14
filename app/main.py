@@ -49,7 +49,8 @@ def main() -> None:
         "- **Build Schedule** — build a full block schedule for a year from scratch\n"
         "- **Review Changes** — approve or reject staged proposals from the other two pages\n"
         "- **Check Assist Swap** — verify a proposed jeopardy/assist week-swap against the real, live schedules\n"
-        "- **Check Clinic Coverage** — verify a proposed resident reassignment after an ambulatory preceptor calls out"
+        "- **Check Clinic Coverage** — verify a proposed resident reassignment after an ambulatory preceptor calls out\n"
+        "- **Check FSC Day** — verify a resident can take a proposed FSC day or half-day away from clinic"
     )
 
 

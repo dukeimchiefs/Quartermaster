@@ -242,3 +242,105 @@ def is_preceptor_cell(text: object) -> tuple[str, str] | None:
     if not name or not site_code:
         return None
     return name, site_code
+
+
+_CC_TOKENS = frozenset({"DOC", "PRIME", "PICKETT", "PICKET"})
+
+
+def is_continuity_clinic_cell(text: object) -> bool:
+    """True if an ambulatory day-part cell denotes the resident's OWN
+    continuity-clinic (CC) panel time — DOC, Pickett, or PRIME — rather
+    than a specific preceptor's clinic or an unrelated placeholder.
+    Confirmed live: this family has heavy typo/punctuation/suffix variance
+    ("DOC(#)", "DOC(%)", "D.O.C. Admin Time", "D.O.C. Endo.crine*",
+    "PRIME(#1)", "P.RIME Orientation", "Pickett(%)", "P.icket Admin") mixed
+    in among ~40 unrelated placeholder codes in the same column family
+    (AAU, AHD, Post-Call, Jeopardy, VA Renal, BHIP, ...) that must NOT
+    match. Periods are stripped before tokenizing (so "D.O.C." -> "DOC")
+    and matching is by whole token, never substring, so an unrelated code
+    that merely contains these letters can't false-positive. A cell that
+    is_preceptor_cell already claims (a real subspecialty-preceptor
+    relationship) is never also a CC-panel cell, so that's checked and
+    excluded first. Deliberately does NOT match bare "CC ..." codes (e.g.
+    "CC Modules", "CC Shirey", confirmed live) — those are a different,
+    unrelated use of "CC" in this workbook; the resident asked about only
+    the three named panel types.
+    """
+    if text is None:
+        return False
+    if is_preceptor_cell(text) is not None:
+        return False
+    raw = str(text).replace(".", "")
+    tokens = re.findall(r"[A-Za-z]+", raw.upper())
+    return any(tok in _CC_TOKENS for tok in tokens)
+
+
+_INPATIENT_TOKENS = frozenset(
+    {
+        "MICU", "CICU", "PICU", "PCICU", "NICU", "ICN", "CCU", "ADMIT", "HOSPITALIST", "HOSP",
+        "ANESTHESIA", "SWING", "ED", "GM", "ACR", "NITE", "IP",
+    }
+)
+_AMBULATORY_EXACT_CODES = frozenset({"BHIP", "BHOP", "GENETICS", "ADOL", "COMET", "SPORT MED"})
+
+
+def is_recognized_ambulatory_rotation(rotation: object) -> bool:
+    """True for a rotation-cell value confidently recognized as an
+    ambulatory (outpatient clinic) week, via a curated, token-based (never
+    substring) match against this program's own naming conventions —
+    confirmed live across master_MASTER_Schedule's 264 distinct real
+    rotation values: an "AMB" token anywhere (AMB Endo, MP AMB, POCUS/MP
+    Amb, ...), a leading "CS" token (CS Endo, CS Heme, ...), a leading
+    "SDE" token followed by "AMB" or "CS" (SDE - AMB Cards, SDE - CS GI),
+    or a small exact-match set of other recognized ambulatory block names
+    (BHIP, BHOP, Genetics, Adol, Comet, Sport Med). Checked BEFORE
+    is_inpatient_rotation by callers — several confirmed-ambulatory values
+    ("CS GM Proc", "AMB TEACH DOC") contain a token ("GM") that would
+    otherwise look inpatient, so the ambulatory-prefix match must win
+    first. Returns False (not a hard "no") for anything not confidently
+    recognized — pair with is_inpatient_rotation and treat neither
+    matching as "unknown, confirm manually," never as a guessed answer.
+    """
+    if rotation is None:
+        return False
+    text = str(rotation).strip().upper()
+    if not text:
+        return False
+    if text in _AMBULATORY_EXACT_CODES:
+        return True
+    tokens = re.findall(r"[A-Z0-9']+", text)
+    if not tokens:
+        return False
+    if "AMB" in tokens:
+        return True
+    if tokens[0] == "CS":
+        return True
+    if tokens[0] == "SDE" and len(tokens) > 1 and tokens[1] in {"AMB", "CS"}:
+        return True
+    return False
+
+
+def is_inpatient_rotation(rotation: object) -> bool:
+    """True for a rotation-cell value confidently recognized as an
+    inpatient (or otherwise clinic-incompatible) service — night float,
+    ICU/CCU services, admitting/hospitalist teams, anesthesia, the ED, or a
+    "9100"-coded service — via curated whole-token matching (never
+    substring, e.g. "AMB Med-Psych" must not false-match "ED" as a
+    substring of "MED"). Only meaningful for values
+    is_recognized_ambulatory_rotation() didn't already claim — callers
+    must check that one first. Returns False (not a hard "no") for
+    anything not confidently recognized; many real rotation-name values
+    (bare specialty names without a CS/AMB prefix, named electives, single-
+    letter program codes) are genuinely ambiguous from the string alone and
+    deliberately fall through to "unknown, confirm manually" rather than a
+    guess in either direction.
+    """
+    if rotation is None:
+        return False
+    text = str(rotation).strip().upper()
+    if not text:
+        return False
+    if text.startswith("9100"):
+        return True
+    tokens = re.findall(r"[A-Z0-9']+", text)
+    return any(tok in _INPATIENT_TOKENS or tok.startswith("NF") or tok.startswith("GM") for tok in tokens)
