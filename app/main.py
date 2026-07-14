@@ -47,7 +47,9 @@ def main() -> None:
         "Use the sidebar to navigate:\n"
         "- **Call Out** — find replacement coverage for a sick resident\n"
         "- **Build Schedule** — build a full block schedule for a year from scratch\n"
-        "- **Review Changes** — approve or reject staged proposals from the other two pages"
+        "- **Review Changes** — approve or reject staged proposals from the other two pages\n"
+        "- **Check Assist Swap** — verify a proposed jeopardy/assist week-swap against the real, live schedules\n"
+        "- **Check Clinic Coverage** — verify a proposed resident reassignment after an ambulatory preceptor calls out"
     )
 
 
