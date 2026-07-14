@@ -19,10 +19,28 @@ with `NotImplementedError`.
 
 ## PII / data handling
 
-`Resident_Schedules/` (if present locally) is real, live roster data synced
-from Duke OneDrive and contains PII. It is git-ignored and **must never be
-read from or written to by this codebase**, in this phase or any later one.
-All seed and test data in this repo is fictional.
+`Resident_Schedules/` (if present locally) is real, live roster/schedule
+data synced from Duke OneDrive and contains PII. It is git-ignored and
+**must never be written to** — that remains absolute, unconditional, no
+exceptions.
+
+As of 2026-07, `real_schedule/` **is** authorized to *read* (never write)
+these files at runtime, for the two schedule-verification tools (Check
+Assist Swap, Check Clinic Coverage — see `app/pages/4_Check_Assist_Swap.py`
+/ `5_Check_Clinic_Coverage.py`). This is a deliberate decision made
+directly by the chief resident, reversing this project's earlier
+blanket "never read" rule for that one package only. Every reader in
+`real_schedule/` opens with `openpyxl.load_workbook(path, read_only=True,
+data_only=True)` — `read_only=True` removes the write API from the
+returned object entirely, which is the actual enforcement mechanism, not
+just a comment (see `tests/test_real_schedule_never_writes.py`).
+
+Everywhere else in this codebase, the original rule is unchanged and still
+absolute: `db/seed.py` and the rest of the toy-DB-backed app must never
+read from, write to, or be pointed at `Resident_Schedules/` as a data
+source. All seed and test data in this repo (outside `real_schedule/`'s
+own runtime reads of the live files) is fictional, and real data must never
+enter git regardless of any of the above.
 
 ## Install
 

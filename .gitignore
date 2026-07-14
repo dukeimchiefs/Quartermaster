@@ -5,9 +5,17 @@ __pycache__/
 *.sqlite3
 .DS_Store
 
-# Real, live, PII-bearing roster data synced from Duke OneDrive.
-# Never read from, written to, or used as a data source by this repo.
+# Real, live, PII-bearing roster data synced from Duke OneDrive. As of
+# 2026-07, real_schedule/ reads (never writes) these files at runtime for
+# the swap/clinic-coverage checking tools — a deliberate, explicit decision
+# by the chief resident. They must still never enter version control.
+# Two patterns: the plain OneDrive sync creates a real directory here, but
+# a symlink named the same (e.g. a convenience symlink into a worktree
+# during development) is a different filesystem type and the trailing-slash
+# form alone does NOT match it — both forms are listed so nothing named
+# Resident_Schedules, of either kind, can ever be accidentally staged.
 Resident_Schedules/
+Resident_Schedules
 
 # Real chief-resident passphrase — never commit. See secrets.toml.example.
 .streamlit/secrets.toml

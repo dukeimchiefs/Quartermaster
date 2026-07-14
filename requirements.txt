@@ -44,3 +44,18 @@ ollama>=0.6.0
 # schedule as a pivot table), so it's declared explicitly here too. Pure
 # data-manipulation library, no network code.
 pandas>=2.0
+
+# Audited 2026-07 (see CLAUDE.md's dependency guardrail): openpyxl (checked
+# v3.1.5) has zero network-related code — grepping the installed package
+# tree, and its one dependency et_xmlfile, for urllib/requests/socket/
+# http.client/httpx imports returns no matches. Pure local .xlsx/.xlsm
+# reader/writer, no telemetry, no license-check phone-home.
+#
+# real_schedule/ uses it to read (never write) the real, live schedule
+# workbooks at Resident_Schedules/ — see CLAUDE.md's PII boundary section.
+# Every real_schedule/ reader calls load_workbook(path, read_only=True,
+# data_only=True); read_only mode removes the write API from the returned
+# object entirely (no .save() exists on it) — this is the actual
+# enforcement mechanism for "never write to Resident_Schedules/", verified
+# by tests/test_real_schedule_never_writes.py, not just a comment.
+openpyxl>=3.1
