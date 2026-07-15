@@ -494,3 +494,144 @@ def check_fsc_reflection_day_request(
         )
 
     return FscReflectionDayCheckResult(findings=findings, reminders=list(_FSC_REFLECTION_STANDARD_REMINDERS))
+
+
+# ---------------------------------------------------------------------------
+# Tool 4: rotation-swap checker
+#
+# Generalizes Tool 1's assist-week swap to ANY rotation — two residents
+# trading which rotation each is on for the same block of weeks (e.g. "I'm
+# on VA GM, you're on AMB Endo, we want to trade for Block 4"). Confirmed
+# with the chief resident: same PGY tier required (same rule as assist-week
+# swaps), and this is a MUTUAL two-resident trade only — no one-directional
+# "move me to X" request without a matching partner. No written policy
+# governs rotation swaps beyond one rule (Work Hours Policy: never approve a
+# swap causing a duty-hour violation) — that's surfaced as a reminder, not
+# machine-checked, since no shift-level hour data exists in these files.
+# ---------------------------------------------------------------------------
+
+
+_ROTATION_SWAP_REMINDERS = (
+    "Confirm this swap doesn't create a duty-hour violation for either resident (per the Work Hours Policy) — not machine-checkable from this data.",
+)
+
+
+@dataclass(frozen=True)
+class RotationSwapCheckResult:
+    findings: list[CheckFinding] = field(default_factory=list)
+    reminders: list[str] = field(default_factory=list)
+
+    @property
+    def is_clear(self) -> bool:
+        return not any(f.severity == "blocking" for f in self.findings)
+
+
+def _resident_pgy(resident_name: str, master_schedule) -> int | None:
+    for record in master_schedule:
+        if record.resident_name == resident_name and record.pgy is not None:
+            return record.pgy
+    return None
+
+
+def check_rotation_swap(
+    resident_1: str,
+    resident_2: str,
+    week_starts: list[dt.date],
+    *,
+    master_schedule,
+    master_assist,
+) -> RotationSwapCheckResult:
+    """Validate a proposed mutual rotation swap: resident_1 and resident_2
+    trade whichever rotations they're each currently on, for every week in
+    `week_starts` (typically a full block — this reader is week-granular,
+    so the caller passes every Monday in the period being swapped, not just
+    the first)."""
+    findings: list[CheckFinding] = []
+
+    tier_1 = _resident_pgy(resident_1, master_schedule)
+    tier_2 = _resident_pgy(resident_2, master_schedule)
+    if tier_1 is not None and tier_2 is not None and tier_1 != tier_2:
+        findings.append(
+            CheckFinding(
+                rule="pgy_mismatch",
+                severity="blocking",
+                message=f"{resident_1} is PGY-{tier_1} but {resident_2} is PGY-{tier_2} — a swap must be within the same PGY tier.",
+            )
+        )
+    elif tier_1 is None or tier_2 is None:
+        findings.append(
+            CheckFinding(
+                rule="pgy_tier_unknown",
+                severity="warning",
+                message="Could not determine PGY tier for one or both residents from the Master Schedule — confirm manually.",
+            )
+        )
+
+    for week_start in week_starts:
+        rotation_1 = _resident_week_rotation(resident_1, week_start, master_schedule)
+        rotation_2 = _resident_week_rotation(resident_2, week_start, master_schedule)
+
+        if rotation_1 is None:
+            findings.append(
+                CheckFinding(
+                    rule="rotation_unknown",
+                    severity="warning",
+                    message=f"Could not find {resident_1}'s rotation for the week of {week_start} in the Master Schedule — confirm manually.",
+                    resident_name=resident_1,
+                    week_start=week_start,
+                )
+            )
+        elif is_non_committing_label(rotation_1):
+            findings.append(
+                CheckFinding(
+                    rule="not_an_active_rotation",
+                    severity="blocking",
+                    message=f"{resident_1} is recorded as {rotation_1!r} the week of {week_start} — not an active rotation to swap.",
+                    resident_name=resident_1,
+                    week_start=week_start,
+                )
+            )
+
+        if rotation_2 is None:
+            findings.append(
+                CheckFinding(
+                    rule="rotation_unknown",
+                    severity="warning",
+                    message=f"Could not find {resident_2}'s rotation for the week of {week_start} in the Master Schedule — confirm manually.",
+                    resident_name=resident_2,
+                    week_start=week_start,
+                )
+            )
+        elif is_non_committing_label(rotation_2):
+            findings.append(
+                CheckFinding(
+                    rule="not_an_active_rotation",
+                    severity="blocking",
+                    message=f"{resident_2} is recorded as {rotation_2!r} the week of {week_start} — not an active rotation to swap.",
+                    resident_name=resident_2,
+                    week_start=week_start,
+                )
+            )
+
+        if _is_on_master_assist_list(resident_1, week_start, master_assist):
+            findings.append(
+                CheckFinding(
+                    rule="on_assist_list",
+                    severity="blocking",
+                    message=f"{resident_1} is on the assist/jeopardy list the week of {week_start} — can't swap their rotation that week.",
+                    resident_name=resident_1,
+                    week_start=week_start,
+                )
+            )
+        if _is_on_master_assist_list(resident_2, week_start, master_assist):
+            findings.append(
+                CheckFinding(
+                    rule="on_assist_list",
+                    severity="blocking",
+                    message=f"{resident_2} is on the assist/jeopardy list the week of {week_start} — can't swap their rotation that week.",
+                    resident_name=resident_2,
+                    week_start=week_start,
+                )
+            )
+
+    return RotationSwapCheckResult(findings=findings, reminders=list(_ROTATION_SWAP_REMINDERS))

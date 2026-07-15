@@ -13,10 +13,11 @@ data synced from Duke OneDrive and contains PII. It is git-ignored and
 exceptions.
 
 As of 2026-07, `real_schedule/` **is** authorized to *read* (never write)
-these files at runtime, for the three schedule-verification tools (Check
-Assist Swap, Check Clinic Coverage, Check FSC/Reflection Day — see
-`app/pages/4_Check_Assist_Swap.py` / `5_Check_Clinic_Coverage.py` /
-`6_Check_FSC_Reflection_Day.py`). This is a deliberate decision made
+these files at runtime, for the four schedule-verification tools (Check
+Assist Swap, Check Clinic Coverage, Check FSC/Reflection Day, Check
+Rotation Swap — see `app/pages/4_Check_Assist_Swap.py` /
+`5_Check_Clinic_Coverage.py` / `6_Check_FSC_Reflection_Day.py` /
+`7_Check_Rotation_Swap.py`). This is a deliberate decision made
 directly by the chief resident, reversing this project's earlier
 blanket "never read" rule for that one package only. Every reader in
 `real_schedule/` opens with `openpyxl.load_workbook(path, read_only=True,

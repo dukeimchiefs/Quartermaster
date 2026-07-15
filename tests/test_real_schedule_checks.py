@@ -16,6 +16,7 @@ from real_schedule.checks import (
     check_assist_swap,
     check_clinic_reassignment,
     check_fsc_reflection_day_request,
+    check_rotation_swap,
 )
 from real_schedule.fsc_tracker import FscBalance
 from real_schedule.master_schedule import MasterScheduleWeek
@@ -411,3 +412,83 @@ def test_full_day_costs_more_than_half_day():
     )
     assert not any(f.rule == "insufficient_fsc_balance" for f in half_day_result.findings)
     assert any(f.rule == "insufficient_fsc_balance" for f in full_day_result.findings)
+
+
+# --- Tool 4: check_rotation_swap --------------------------------------------
+
+_SWAP_WEEK_1 = dt.date(2026, 7, 6)
+_SWAP_WEEK_2 = dt.date(2026, 7, 13)
+
+
+def _rotation_swap_base_inputs():
+    master_schedule = [
+        MasterScheduleWeek(resident_name="Eta, Fictional", pgy=2, week_start=_SWAP_WEEK_1, rotation="VA GM"),
+        MasterScheduleWeek(resident_name="Eta, Fictional", pgy=2, week_start=_SWAP_WEEK_2, rotation="VA GM"),
+        MasterScheduleWeek(resident_name="Theta, Fictional", pgy=2, week_start=_SWAP_WEEK_1, rotation="AMB Endo"),
+        MasterScheduleWeek(resident_name="Theta, Fictional", pgy=2, week_start=_SWAP_WEEK_2, rotation="AMB Endo"),
+    ]
+    master_assist: list[MasterAssistDuty] = []
+    return master_schedule, master_assist
+
+
+def test_clean_rotation_swap_has_no_blocking_findings():
+    master_schedule, master_assist = _rotation_swap_base_inputs()
+    result = check_rotation_swap(
+        "Eta, Fictional", "Theta, Fictional", [_SWAP_WEEK_1, _SWAP_WEEK_2],
+        master_schedule=master_schedule, master_assist=master_assist,
+    )
+    assert result.is_clear
+    assert len(result.reminders) == 1
+
+
+def test_rotation_swap_pgy_mismatch_blocks():
+    master_schedule, master_assist = _rotation_swap_base_inputs()
+    master_schedule = [
+        MasterScheduleWeek(resident_name="Eta, Fictional", pgy=2, week_start=_SWAP_WEEK_1, rotation="VA GM"),
+        MasterScheduleWeek(resident_name="Theta, Fictional", pgy=3, week_start=_SWAP_WEEK_1, rotation="AMB Endo"),
+    ]
+    result = check_rotation_swap(
+        "Eta, Fictional", "Theta, Fictional", [_SWAP_WEEK_1],
+        master_schedule=master_schedule, master_assist=master_assist,
+    )
+    assert not result.is_clear
+    assert any(f.rule == "pgy_mismatch" and f.severity == "blocking" for f in result.findings)
+
+
+def test_rotation_swap_blocks_when_resident_on_leave():
+    master_schedule, master_assist = _rotation_swap_base_inputs()
+    master_schedule = [
+        MasterScheduleWeek(resident_name="Eta, Fictional", pgy=2, week_start=_SWAP_WEEK_1, rotation="VAC 1"),
+        MasterScheduleWeek(resident_name="Theta, Fictional", pgy=2, week_start=_SWAP_WEEK_1, rotation="AMB Endo"),
+    ]
+    result = check_rotation_swap(
+        "Eta, Fictional", "Theta, Fictional", [_SWAP_WEEK_1],
+        master_schedule=master_schedule, master_assist=master_assist,
+    )
+    assert not result.is_clear
+    finding = next(f for f in result.findings if f.rule == "not_an_active_rotation")
+    assert finding.resident_name == "Eta, Fictional"
+
+
+def test_rotation_swap_blocks_when_resident_on_assist_list():
+    master_schedule, _ = _rotation_swap_base_inputs()
+    master_assist = [
+        MasterAssistDuty(resident_name="Theta, Fictional", pgy_tier="PGY-2", week_start=_SWAP_WEEK_1, duty="Pickett", extra=None),
+    ]
+    result = check_rotation_swap(
+        "Eta, Fictional", "Theta, Fictional", [_SWAP_WEEK_1],
+        master_schedule=master_schedule, master_assist=master_assist,
+    )
+    assert not result.is_clear
+    finding = next(f for f in result.findings if f.rule == "on_assist_list")
+    assert finding.resident_name == "Theta, Fictional"
+
+
+def test_rotation_swap_unknown_rotation_is_a_warning():
+    master_schedule, master_assist = _rotation_swap_base_inputs()
+    result = check_rotation_swap(
+        "Eta, Fictional", "Theta, Fictional", [_SWAP_WEEK_1, dt.date(2026, 8, 3)],
+        master_schedule=master_schedule, master_assist=master_assist,
+    )
+    finding = next(f for f in result.findings if f.rule == "rotation_unknown")
+    assert finding.severity == "warning"
