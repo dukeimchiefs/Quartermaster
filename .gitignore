@@ -19,3 +19,11 @@ Resident_Schedules
 
 # Real chief-resident passphrase — never commit. See secrets.toml.example.
 .streamlit/secrets.toml
+
+# Program Policies
+ProgramPolicies/
+
+# Real, PII-bearing resident roster (names, phone, email, squad/team
+# assignments) — same "never enter version control" rule as
+# Resident_Schedules/ above.
+residents/
