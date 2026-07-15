@@ -10,6 +10,7 @@ import datetime as dt
 from real_schedule.common import (
     canonical_week_start,
     is_continuity_clinic_cell,
+    is_day_off_cell,
     is_inpatient_rotation,
     is_jeopardy_duty,
     is_jeopardy_label,
@@ -265,3 +266,26 @@ def test_is_inpatient_rotation_false_when_ambulatory_prefix_should_win():
 def test_is_inpatient_rotation_false_for_unknown():
     assert is_inpatient_rotation("Global Health") is False
     assert is_inpatient_rotation(None) is False
+
+
+def test_is_day_off_cell_matches_off_and_annotated_variants():
+    assert is_day_off_cell("OFF") is True
+    assert is_day_off_cell("OFF ") is True
+    assert is_day_off_cell("OFF (holiday)") is True
+    assert is_day_off_cell("off") is True
+
+
+def test_is_day_off_cell_false_for_unrelated_shift_codes():
+    assert is_day_off_cell("On") is False
+    assert is_day_off_cell("Pre") is False
+    assert is_day_off_cell("NIGHT A") is False
+    assert is_day_off_cell(None) is False
+
+
+def test_is_day_off_cell_false_for_annotation_mentioning_off_elsewhere():
+    """Confirmed live: "Pre (intern off)" is a real, distinct shift-type
+    value (this resident's own shift is "Pre"; the parenthetical just
+    notes the INTERN is off) — a substring "off" check would wrongly treat
+    this resident as off too."""
+    assert is_day_off_cell("Pre (intern off)") is False
+    assert is_day_off_cell("POST/OFF") is False

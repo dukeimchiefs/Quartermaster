@@ -361,3 +361,18 @@ def is_inpatient_rotation(rotation: object) -> bool:
         return True
     tokens = re.findall(r"[A-Z0-9']+", text)
     return any(tok in _INPATIENT_TOKENS or tok.startswith("NF") or tok.startswith("GM") for tok in tokens)
+
+
+def is_day_off_cell(text: object) -> bool:
+    """True for a weekly_INPATIENT_Schedules day-part cell denoting that
+    resident is OFF that day. Confirmed live across multiple real inpatient
+    files (VA GM, DRH GM, VA MICU, DUH MICU, DUH CICU): the cell reads
+    "OFF" with real annotation variants ("OFF ", "OFF (holiday)"). Matched
+    by PREFIX, never substring/containment — confirmed live that "Pre
+    (intern off)" is a real, distinct shift-type value (this resident's own
+    shift that day is "Pre"; the parenthetical just notes the INTERN is
+    off) that a naive `"off" in text.lower()` check would wrongly treat as
+    this resident being off."""
+    if text is None:
+        return False
+    return str(text).strip().upper().startswith("OFF")

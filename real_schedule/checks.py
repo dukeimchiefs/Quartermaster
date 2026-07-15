@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from real_schedule.common import (
     is_continuity_clinic_cell,
+    is_day_off_cell,
     is_inpatient_rotation,
     is_jeopardy_duty,
     is_jeopardy_label,
@@ -635,3 +636,104 @@ def check_rotation_swap(
             )
 
     return RotationSwapCheckResult(findings=findings, reminders=list(_ROTATION_SWAP_REMINDERS))
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: day-off alignment checker (SAC requests)
+#
+# "Strategic Adjustment of Calendar" requests, per the Well-being Policy:
+# a resident asks whether a specific day during an upcoming inpatient block
+# can be their day off (e.g. a wedding). Confirmed with the chief resident:
+# check both — is the resident's own currently-assigned team already off
+# that day, and if not, which other teams on that same service/week are.
+# Moving a resident to a different team is always the chief's call, never
+# auto-approved here — see _DAY_OFF_ALIGNMENT_REMINDERS.
+# ---------------------------------------------------------------------------
+
+
+_DAY_OFF_ALIGNMENT_REMINDERS = (
+    "Confirm any alternative team is still an appropriate fit for this resident's PGY level and track before moving them — not confirmed as a hard rule from this data.",
+)
+
+
+@dataclass(frozen=True)
+class DayOffAlignmentResult:
+    findings: list[CheckFinding] = field(default_factory=list)
+    reminders: list[str] = field(default_factory=list)
+    current_team: str | None = None
+    currently_off: bool = False
+    alternative_teams_with_day_off: list[str] = field(default_factory=list)
+
+    @property
+    def is_clear(self) -> bool:
+        return not any(f.severity == "blocking" for f in self.findings)
+
+
+def check_day_off_alignment(
+    resident_name: str,
+    target_date: dt.date,
+    *,
+    inpatient_week_rows,
+) -> DayOffAlignmentResult:
+    """`inpatient_week_rows` is whatever real_schedule.inpatient_schedule.
+    load_inpatient_week_rows() returned for the relevant service file (may
+    span multiple week-blocks — only rows whose day_parts actually contain
+    `target_date` are considered, so passing the whole file's rows is
+    fine, no pre-filtering by week needed)."""
+    own_rows = [r for r in inpatient_week_rows if r.resident_name == resident_name and target_date in r.day_parts]
+    if not own_rows:
+        return DayOffAlignmentResult(
+            findings=[
+                CheckFinding(
+                    rule="resident_not_found",
+                    severity="blocking",
+                    message=f"{resident_name} isn't recorded on this service for the week of {target_date} — confirm they're actually on this rotation that week.",
+                    resident_name=resident_name,
+                    week_start=target_date,
+                )
+            ],
+            reminders=list(_DAY_OFF_ALIGNMENT_REMINDERS),
+        )
+
+    own_row = own_rows[0]
+    if is_day_off_cell(own_row.day_parts[target_date]):
+        return DayOffAlignmentResult(current_team=own_row.team, currently_off=True, reminders=list(_DAY_OFF_ALIGNMENT_REMINDERS))
+
+    alternative_teams = sorted(
+        {
+            r.team
+            for r in inpatient_week_rows
+            if r.team
+            and r.resident_name != resident_name
+            and target_date in r.day_parts
+            and is_day_off_cell(r.day_parts[target_date])
+        }
+    )
+    if alternative_teams:
+        findings = [
+            CheckFinding(
+                rule="alternative_teams_available",
+                severity="warning",
+                message=f"{resident_name}'s current team ({own_row.team}) doesn't have {target_date} off, but {', '.join(alternative_teams)} do — consider reassigning if this SAC request should be honored.",
+                resident_name=resident_name,
+                week_start=target_date,
+            )
+        ]
+    else:
+        findings = [
+            CheckFinding(
+                rule="no_team_has_day_off",
+                severity="warning",
+                message=f"No team on this service has {target_date} off — this SAC request likely can't be honored as requested.",
+                resident_name=resident_name,
+                week_start=target_date,
+            )
+        ]
+
+    return DayOffAlignmentResult(
+        findings=findings,
+        current_team=own_row.team,
+        currently_off=False,
+        alternative_teams_with_day_off=alternative_teams,
+        reminders=list(_DAY_OFF_ALIGNMENT_REMINDERS),
+    )

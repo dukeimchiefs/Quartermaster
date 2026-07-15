@@ -15,10 +15,12 @@ from real_schedule.checks import (
     FAIRNESS_FLAG_THRESHOLD_PULLS,
     check_assist_swap,
     check_clinic_reassignment,
+    check_day_off_alignment,
     check_fsc_reflection_day_request,
     check_rotation_swap,
 )
 from real_schedule.fsc_tracker import FscBalance
+from real_schedule.inpatient_schedule import InpatientDayRow
 from real_schedule.master_schedule import MasterScheduleWeek
 
 WEEK_COVERED = dt.date(2026, 7, 6)
@@ -492,3 +494,81 @@ def test_rotation_swap_unknown_rotation_is_a_warning():
     )
     finding = next(f for f in result.findings if f.rule == "rotation_unknown")
     assert finding.severity == "warning"
+
+
+# --- Tool 5: check_day_off_alignment ----------------------------------------
+
+_TARGET_DATE = dt.date(2026, 7, 11)  # a Saturday
+
+
+def test_currently_off_has_no_blocking_findings():
+    inpatient_week_rows = [
+        InpatientDayRow(team="GM1", resident_name="Iota, Fictional", day_parts={_TARGET_DATE: "OFF"}),
+        InpatientDayRow(team="GM2", resident_name="Kappa, Fictional", day_parts={_TARGET_DATE: "On"}),
+    ]
+    result = check_day_off_alignment("Iota, Fictional", _TARGET_DATE, inpatient_week_rows=inpatient_week_rows)
+    assert result.is_clear
+    assert result.currently_off is True
+    assert result.current_team == "GM1"
+    assert result.findings == []
+
+
+def test_resident_not_found_blocks():
+    inpatient_week_rows = [
+        InpatientDayRow(team="GM1", resident_name="Iota, Fictional", day_parts={_TARGET_DATE: "OFF"}),
+    ]
+    result = check_day_off_alignment("Nobody, Fictional", _TARGET_DATE, inpatient_week_rows=inpatient_week_rows)
+    assert not result.is_clear
+    assert any(f.rule == "resident_not_found" and f.severity == "blocking" for f in result.findings)
+
+
+def test_finds_alternative_teams_with_day_off():
+    inpatient_week_rows = [
+        InpatientDayRow(team="GM1", resident_name="Iota, Fictional", day_parts={_TARGET_DATE: "On"}),
+        InpatientDayRow(team="GM2", resident_name="Kappa, Fictional", day_parts={_TARGET_DATE: "OFF"}),
+        InpatientDayRow(team="GM3", resident_name="Lambda, Fictional", day_parts={_TARGET_DATE: "OFF"}),
+        InpatientDayRow(team="GM4", resident_name="Mu, Fictional", day_parts={_TARGET_DATE: "Post"}),
+    ]
+    result = check_day_off_alignment("Iota, Fictional", _TARGET_DATE, inpatient_week_rows=inpatient_week_rows)
+    assert result.is_clear  # a warning alone doesn't block
+    assert result.currently_off is False
+    assert result.alternative_teams_with_day_off == ["GM2", "GM3"]
+    assert any(f.rule == "alternative_teams_available" and f.severity == "warning" for f in result.findings)
+
+
+def test_no_team_has_day_off_is_a_warning_not_blocking():
+    inpatient_week_rows = [
+        InpatientDayRow(team="GM1", resident_name="Iota, Fictional", day_parts={_TARGET_DATE: "On"}),
+        InpatientDayRow(team="GM2", resident_name="Kappa, Fictional", day_parts={_TARGET_DATE: "Post"}),
+    ]
+    result = check_day_off_alignment("Iota, Fictional", _TARGET_DATE, inpatient_week_rows=inpatient_week_rows)
+    assert result.is_clear
+    assert result.alternative_teams_with_day_off == []
+    finding = next(f for f in result.findings if f.rule == "no_team_has_day_off")
+    assert finding.severity == "warning"
+
+
+def test_alternative_teams_excludes_blank_team_labels():
+    """Confirmed live: some real inpatient rows have a blank team column
+    (e.g. a sub-row under a shared group label) — a blank "team" isn't an
+    actionable reassignment suggestion for the chief."""
+    inpatient_week_rows = [
+        InpatientDayRow(team="GM1", resident_name="Iota, Fictional", day_parts={_TARGET_DATE: "On"}),
+        InpatientDayRow(team="", resident_name="Nu, Fictional", day_parts={_TARGET_DATE: "OFF"}),
+        InpatientDayRow(team="GM2", resident_name="Kappa, Fictional", day_parts={_TARGET_DATE: "OFF"}),
+    ]
+    result = check_day_off_alignment("Iota, Fictional", _TARGET_DATE, inpatient_week_rows=inpatient_week_rows)
+    assert result.alternative_teams_with_day_off == ["GM2"]
+
+
+def test_only_considers_the_target_date_not_other_weeks():
+    """A row for the same resident from a DIFFERENT week (target_date not
+    in its day_parts) must not be mistaken for their current assignment."""
+    other_week_date = dt.date(2026, 7, 18)
+    inpatient_week_rows = [
+        InpatientDayRow(team="GM1", resident_name="Iota, Fictional", day_parts={other_week_date: "OFF"}),
+        InpatientDayRow(team="GM2", resident_name="Iota, Fictional", day_parts={_TARGET_DATE: "On"}),
+    ]
+    result = check_day_off_alignment("Iota, Fictional", _TARGET_DATE, inpatient_week_rows=inpatient_week_rows)
+    assert result.current_team == "GM2"
+    assert result.currently_off is False
