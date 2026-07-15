@@ -27,6 +27,7 @@ from real_schedule.ambulatory import load_ambulatory_week
 from real_schedule.available_clinics import load_available_clinics
 from real_schedule.checks import check_clinic_reassignment
 from real_schedule.common import is_preceptor_cell
+from real_schedule.roster import RosterIndex, load_roster
 
 require_chief_auth()
 
@@ -35,6 +36,7 @@ st.caption("Verify a proposed resident reassignment after an ambulatory precepto
 
 _RESIDENT_SCHEDULES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "Resident_Schedules")
 _AMBULATORY_PATH = os.path.join(_RESIDENT_SCHEDULES_DIR, "master_AMBULATORY_schedule_2026-2027.xlsx")
+_ROSTER_PATH = os.path.join(_RESIDENT_SCHEDULES_DIR, "duke_residency_2026-2027.csv")
 _NON_WEEK_SHEETS = ("Master", "Preferred Clinics", "Build")
 
 if not os.path.isdir(_RESIDENT_SCHEDULES_DIR):
@@ -62,15 +64,17 @@ week_sheet_name = st.selectbox("Week", options=week_sheet_names)
 
 
 @st.cache_data(show_spinner="Reading real schedule workbooks...")
-def _load_week(ambulatory_mtime: float, week_sheet_name: str, clinics_path: str, clinics_mtime: float):
-    del ambulatory_mtime, clinics_mtime  # cache-key only
-    ambulatory_week, w1 = load_ambulatory_week(_AMBULATORY_PATH, week_sheet_name)
+def _load_week(ambulatory_mtime: float, week_sheet_name: str, clinics_path: str, clinics_mtime: float, roster_mtime: float):
+    del ambulatory_mtime, clinics_mtime, roster_mtime  # cache-key only
+    roster_entries, w0 = load_roster(_ROSTER_PATH)
+    roster = RosterIndex(roster_entries)
+    ambulatory_week, w1 = load_ambulatory_week(_AMBULATORY_PATH, week_sheet_name, roster=roster)
     available_clinics, w2 = load_available_clinics(clinics_path)
-    return ambulatory_week, available_clinics, w1 + w2
+    return ambulatory_week, available_clinics, w0 + w1 + w2
 
 
 ambulatory_week, available_clinics, load_warnings = _load_week(
-    os.path.getmtime(_AMBULATORY_PATH), week_sheet_name, available_clinics_path, os.path.getmtime(available_clinics_path)
+    os.path.getmtime(_AMBULATORY_PATH), week_sheet_name, available_clinics_path, os.path.getmtime(available_clinics_path), os.path.getmtime(_ROSTER_PATH)
 )
 
 if load_warnings:

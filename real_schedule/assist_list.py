@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 import openpyxl
 
 from real_schedule.common import ParseWarning, normalize_pgy, parse_duty_cell, parse_name_last_first
+from real_schedule.roster import RosterIndex
 
 _ROSTER_HEADER_ROW = 4
 _ROSTER_DATA_START_ROW = 5
@@ -134,7 +135,7 @@ class MasterAssistDuty:
     extra: str | None  # trailing text/second tag, e.g. "jeopardy-I" in "(Pickett) (jeopardy-I)"
 
 
-def load_weekly_assist_roster(path: str, sheet_name: str) -> tuple[list[AssistWeekEntry], list[ParseWarning]]:
+def load_weekly_assist_roster(path: str, sheet_name: str, *, roster: RosterIndex | None = None) -> tuple[list[AssistWeekEntry], list[ParseWarning]]:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     if sheet_name not in wb.sheetnames:
         return [], [ParseWarning(sheet=sheet_name, row=0, reason="sheet not found in workbook")]
@@ -204,6 +205,10 @@ def load_weekly_assist_roster(path: str, sheet_name: str) -> tuple[list[AssistWe
         name = parse_name_last_first(last, first)
         if name is None:
             continue
+        if roster is not None:
+            name, matched = roster.canonicalize(name)
+            if not matched:
+                warnings.append(ParseWarning(sheet=sheet_name, row=row_number, reason=f"{name!r} not found in internal roster — using name as parsed"))
         pgy = normalize_pgy(row[year_col]) if year_col is not None and year_col < len(row) else None
         rotation = (
             str(row[rotation_col]).strip() if rotation_col is not None and rotation_col < len(row) and row[rotation_col] is not None else ""
@@ -287,7 +292,7 @@ def load_weekly_callout_log(path: str, sheet_name: str) -> tuple[list[CalloutLog
     return records, warnings
 
 
-def load_master_assist_list(path: str) -> tuple[list[MasterAssistDuty], list[ParseWarning]]:
+def load_master_assist_list(path: str, *, roster: RosterIndex | None = None) -> tuple[list[MasterAssistDuty], list[ParseWarning]]:
     """`Master Assist List` sheet: one column per week, rows grouped by a
     PGY-tier section label in column A ("PGY-1", "PGY-2", "PGY-3 +"), each
     subsequent row a free-text "Last, First (DUTY)" cell per week-column
@@ -325,6 +330,10 @@ def load_master_assist_list(path: str) -> tuple[list[MasterAssistDuty], list[Par
                 warnings.append(ParseWarning(sheet="Master Assist List", row=row_number, reason=f"unparseable duty cell {cell!r}"))
                 continue
             name, duty, extra = parsed
+            if roster is not None:
+                name, matched = roster.canonicalize(name)
+                if not matched:
+                    warnings.append(ParseWarning(sheet="Master Assist List", row=row_number, reason=f"{name!r} not found in internal roster — using name as parsed"))
             records.append(
                 MasterAssistDuty(resident_name=name, pgy_tier=current_tier, week_start=week_start, duty=duty, extra=extra)
             )

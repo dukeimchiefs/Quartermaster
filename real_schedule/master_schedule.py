@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import openpyxl
 
 from real_schedule.common import ParseWarning, normalize_pgy
+from real_schedule.roster import RosterIndex
 
 _HEADER_ROW = 3
 _DATA_START_ROW = 4
@@ -34,7 +35,7 @@ class MasterScheduleWeek:
     rotation: str
 
 
-def _read_sheet(ws, sheet_name: str) -> tuple[list[MasterScheduleWeek], list[ParseWarning]]:
+def _read_sheet(ws, sheet_name: str, roster: RosterIndex | None) -> tuple[list[MasterScheduleWeek], list[ParseWarning]]:
     records: list[MasterScheduleWeek] = []
     warnings: list[ParseWarning] = []
 
@@ -56,6 +57,10 @@ def _read_sheet(ws, sheet_name: str) -> tuple[list[MasterScheduleWeek], list[Par
         if name is None or not str(name).strip():
             continue  # spacer/blank row
         name = str(name).strip()
+        if roster is not None:
+            name, matched = roster.canonicalize(name)
+            if not matched:
+                warnings.append(ParseWarning(sheet=sheet_name, row=row_number, reason=f"{name!r} not found in internal roster — using name as parsed"))
         pgy = normalize_pgy(row[_YEAR_COL - 1])
 
         for col_index, week_start in week_cols:
@@ -71,9 +76,13 @@ def _read_sheet(ws, sheet_name: str) -> tuple[list[MasterScheduleWeek], list[Par
     return records, warnings
 
 
-def load_master_schedule(path: str) -> tuple[list[MasterScheduleWeek], list[ParseWarning]]:
+def load_master_schedule(path: str, *, roster: RosterIndex | None = None) -> tuple[list[MasterScheduleWeek], list[ParseWarning]]:
     """Reads both Intern Master and Upper Level Master (they're identically
-    shaped) and returns the combined resident x week x rotation records."""
+    shaped) and returns the combined resident x week x rotation records. If
+    `roster` (see real_schedule/roster.py) is given, every resident_name is
+    canonicalized against it first — this sheet's own Name column has a
+    confirmed real formatting inconsistency (~19% "First Last" instead of
+    "Last, First") that would otherwise silently break cross-file joins."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     all_records: list[MasterScheduleWeek] = []
     all_warnings: list[ParseWarning] = []
@@ -81,7 +90,7 @@ def load_master_schedule(path: str) -> tuple[list[MasterScheduleWeek], list[Pars
         if sheet_name not in wb.sheetnames:
             all_warnings.append(ParseWarning(sheet=sheet_name, row=0, reason="sheet not found in workbook"))
             continue
-        records, warnings = _read_sheet(wb[sheet_name], sheet_name)
+        records, warnings = _read_sheet(wb[sheet_name], sheet_name, roster)
         all_records.extend(records)
         all_warnings.extend(warnings)
     return all_records, all_warnings

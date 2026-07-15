@@ -14,7 +14,15 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass, field
 
-from real_schedule.common import is_jeopardy_duty, is_jeopardy_label, is_non_committing_label, is_preceptor_cell
+from real_schedule.common import (
+    is_continuity_clinic_cell,
+    is_inpatient_rotation,
+    is_jeopardy_duty,
+    is_jeopardy_label,
+    is_non_committing_label,
+    is_preceptor_cell,
+    is_recognized_ambulatory_rotation,
+)
 
 FAIRNESS_FLAG_THRESHOLD_PULLS = 2.0
 """A policy knob, not a derived "correct" number — flag (never block) a
@@ -305,3 +313,184 @@ def check_clinic_reassignment(
         )
 
     return ClinicReassignmentCheckResult(findings=findings, affected_residents=affected)
+
+
+# ---------------------------------------------------------------------------
+# Tool 3: FSC/Reflection day eligibility checker
+#
+# "FSC" (Flexible Self Care) days and Reflection days are two separately-
+# named entitlements per the Well-being Policy (each 4 half-days/2 full
+# days/year) but share one request form ("FSC/Reflection Request Form"),
+# one eligibility rule, and — confirmed live — one pooled balance column in
+# FSCTracker (no separate Reflection balance exists there), so they're
+# checked as a single combined concept here, matching the real form's own
+# name rather than inventing a distinction the underlying data doesn't
+# separate. Per the Well-being Policy: eligible rotations are "ambulatory,
+# consults, and SDE," and "FSC/reflection time cannot replace continuity
+# clinic" — both directly reflected in the checks below.
+# ---------------------------------------------------------------------------
+
+
+_FSC_REFLECTION_PORTION_COST = {"AM": 0.5, "PM": 0.5, "FULL": 1.0}
+_FSC_REFLECTION_HALVES_FOR_PORTION = {"AM": ("AM",), "PM": ("PM",), "FULL": ("AM", "PM")}
+_FSC_REFLECTION_STANDARD_REMINDERS = (
+    "FSC/Reflection Day requests should be submitted at least 90 days in advance (per the Well-being Policy) — confirm this request meets that window.",
+    "A specific date must be requested — a request like \"whichever day I have clinic\" isn't valid per policy.",
+)
+
+
+@dataclass(frozen=True)
+class FscReflectionDayCheckResult:
+    findings: list[CheckFinding] = field(default_factory=list)
+    reminders: list[str] = field(default_factory=list)
+
+    @property
+    def is_clear(self) -> bool:
+        return not any(f.severity == "blocking" for f in self.findings)
+
+
+def _resident_week_rotation(resident_name: str, week_start: dt.date, master_schedule) -> str | None:
+    for record in master_schedule:
+        if record.resident_name == resident_name and record.week_start == week_start:
+            return record.rotation
+    return None
+
+
+def _is_on_master_assist_list(resident_name: str, week_start: dt.date, master_assist) -> bool:
+    """True if the resident has ANY Master Assist List entry for that week
+    — any duty tag (PRIME/DOC/Pickett/JEOPARDY), not just jeopardy. Being
+    listed on the Master Assist List at all that week means they're in the
+    backup-duty pool (the program's own jeopardy-vs-assist-list
+    distinction — see solver/repair.py) and can't be pulled from clinic."""
+    return any(d.resident_name == resident_name and d.week_start == week_start for d in master_assist)
+
+
+def _resident_day_part_cell(resident_name: str, date_: dt.date, half: str, ambulatory_week) -> str | None:
+    for row in ambulatory_week:
+        if row.resident_name == resident_name:
+            return row.day_parts.get((date_, half))
+    return None
+
+
+def _resident_fsc_balance(resident_name: str, fsc_balances):
+    for balance in fsc_balances:
+        if balance.resident_name == resident_name:
+            return balance
+    return None
+
+
+def check_fsc_reflection_day_request(
+    resident_name: str,
+    date_: dt.date,
+    portion: str,
+    *,
+    master_schedule,
+    master_assist,
+    ambulatory_week,
+    fsc_balances,
+) -> FscReflectionDayCheckResult:
+    """Validate a proposed FSC/Reflection day or half-day request per the
+    Well-being Policy: the resident must be on an eligible rotation that
+    week (ambulatory, consults, or SDE — see
+    common.is_recognized_ambulatory_rotation), not on the assist list or
+    jeopardy, and the specific day/half-day requested must not be their own
+    continuity clinic (DOC/Pickett/PRIME — "FSC/reflection time cannot
+    replace continuity clinic"). Also flags (never blocks) an insufficient
+    balance from FSCTracker. `portion` is "AM", "PM", or "FULL", matching
+    check_clinic_reassignment's half_day vocabulary.
+    """
+    findings: list[CheckFinding] = []
+    week_start = date_ - dt.timedelta(days=date_.weekday())
+
+    rotation = _resident_week_rotation(resident_name, week_start, master_schedule)
+    if rotation is None:
+        findings.append(
+            CheckFinding(
+                rule="rotation_unknown",
+                severity="warning",
+                message=f"Could not find {resident_name}'s rotation for the week of {week_start} in the Master Schedule — confirm they're actually on an eligible rotation.",
+                resident_name=resident_name,
+                week_start=week_start,
+            )
+        )
+    elif is_non_committing_label(rotation):
+        findings.append(
+            CheckFinding(
+                rule="not_eligible_rotation",
+                severity="blocking",
+                message=f"{resident_name} is recorded as {rotation!r} the week of {week_start} — not an eligible (ambulatory/consults/SDE) week, can't approve an FSC/Reflection day.",
+                resident_name=resident_name,
+                week_start=week_start,
+            )
+        )
+    elif not is_recognized_ambulatory_rotation(rotation):
+        if is_inpatient_rotation(rotation):
+            findings.append(
+                CheckFinding(
+                    rule="not_eligible_rotation",
+                    severity="blocking",
+                    message=f"{resident_name} is on {rotation!r} the week of {week_start} — an inpatient rotation, not eligible for an FSC/Reflection day.",
+                    resident_name=resident_name,
+                    week_start=week_start,
+                )
+            )
+        else:
+            findings.append(
+                CheckFinding(
+                    rule="rotation_type_unconfirmed",
+                    severity="warning",
+                    message=f"Couldn't confirm {rotation!r} is an eligible (ambulatory/consults/SDE) rotation — verify manually before approving.",
+                    resident_name=resident_name,
+                    week_start=week_start,
+                )
+            )
+
+    if _is_on_master_assist_list(resident_name, week_start, master_assist):
+        findings.append(
+            CheckFinding(
+                rule="on_assist_list",
+                severity="blocking",
+                message=f"{resident_name} is on the assist/jeopardy list the week of {week_start} — can't be pulled from clinic.",
+                resident_name=resident_name,
+                week_start=week_start,
+            )
+        )
+
+    cc_halves = [
+        half
+        for half in _FSC_REFLECTION_HALVES_FOR_PORTION[portion]
+        if is_continuity_clinic_cell(_resident_day_part_cell(resident_name, date_, half, ambulatory_week))
+    ]
+    if cc_halves:
+        findings.append(
+            CheckFinding(
+                rule="own_continuity_clinic",
+                severity="blocking",
+                message=f"{resident_name} has their own continuity clinic ({', '.join(cc_halves)}) on {date_} — FSC/reflection time cannot replace continuity clinic.",
+                resident_name=resident_name,
+                week_start=date_,
+            )
+        )
+
+    balance = _resident_fsc_balance(resident_name, fsc_balances)
+    cost = _FSC_REFLECTION_PORTION_COST[portion]
+    if balance is None or balance.fsc_left is None:
+        findings.append(
+            CheckFinding(
+                rule="fsc_balance_unknown",
+                severity="warning",
+                message=f"No FSC/Reflection balance found for {resident_name} in the tracker — confirm eligibility manually.",
+                resident_name=resident_name,
+            )
+        )
+    elif balance.fsc_left < cost:
+        findings.append(
+            CheckFinding(
+                rule="insufficient_fsc_balance",
+                severity="warning",
+                message=f"{resident_name} has {balance.fsc_left} FSC/Reflection day(s) left; this request costs {cost} — may exceed their allotment (chief's call).",
+                resident_name=resident_name,
+            )
+        )
+
+    return FscReflectionDayCheckResult(findings=findings, reminders=list(_FSC_REFLECTION_STANDARD_REMINDERS))

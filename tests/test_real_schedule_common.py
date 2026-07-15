@@ -9,10 +9,13 @@ import datetime as dt
 
 from real_schedule.common import (
     canonical_week_start,
+    is_continuity_clinic_cell,
+    is_inpatient_rotation,
     is_jeopardy_duty,
     is_jeopardy_label,
     is_non_committing_label,
     is_preceptor_cell,
+    is_recognized_ambulatory_rotation,
     normalize_pgy,
     parse_duty_cell,
     parse_name_last_first,
@@ -181,3 +184,84 @@ def test_is_non_committing_label_true_for_jeopardy_off_and_leave():
 def test_is_non_committing_label_false_for_ordinary_rotation():
     assert is_non_committing_label("VA GM") is False
     assert is_non_committing_label("AMB Endo") is False
+
+
+def test_is_continuity_clinic_cell_matches_doc_prime_pickett_and_typo_variants():
+    """Confirmed live: this family has heavy typo/punctuation/suffix
+    variance in real ambulatory day-part cells."""
+    assert is_continuity_clinic_cell("DOC") is True
+    assert is_continuity_clinic_cell("DOC(#)") is True
+    assert is_continuity_clinic_cell("DOC(%)") is True
+    assert is_continuity_clinic_cell("D.O.C. Admin Time") is True
+    assert is_continuity_clinic_cell("D.O.C. Endo.crine*") is True
+    assert is_continuity_clinic_cell("PRIME") is True
+    assert is_continuity_clinic_cell("PRIME(#1)") is True
+    assert is_continuity_clinic_cell("P.RIME Orientation") is True
+    assert is_continuity_clinic_cell("Pickett") is True
+    assert is_continuity_clinic_cell("Pickett(%)") is True
+    assert is_continuity_clinic_cell("P.icket Admin") is True
+
+
+def test_is_continuity_clinic_cell_false_for_unrelated_placeholders():
+    assert is_continuity_clinic_cell("AAU") is False
+    assert is_continuity_clinic_cell("Post-Call") is False
+    assert is_continuity_clinic_cell("VA Renal") is False
+    assert is_continuity_clinic_cell("Jeopardy") is False
+    assert is_continuity_clinic_cell("AHD") is False
+    assert is_continuity_clinic_cell(None) is False
+
+
+def test_is_continuity_clinic_cell_false_for_unrelated_cc_code():
+    """"CC Modules"/"CC Shirey" are a different, unrelated use of "CC" in
+    this workbook, not one of the three named panel types."""
+    assert is_continuity_clinic_cell("CC Modules") is False
+
+
+def test_is_continuity_clinic_cell_false_for_real_preceptor_cell():
+    """A real subspecialty-preceptor relationship is never also the
+    resident's own CC-panel time."""
+    assert is_continuity_clinic_cell("Jane Doe\n(SD)") is False
+
+
+def test_is_recognized_ambulatory_rotation_matches_amb_and_cs_prefixes():
+    assert is_recognized_ambulatory_rotation("AMB Endo") is True
+    assert is_recognized_ambulatory_rotation("MP AMB") is True
+    assert is_recognized_ambulatory_rotation("POCUS/MP Amb") is True
+    assert is_recognized_ambulatory_rotation("CS Endo") is True
+    assert is_recognized_ambulatory_rotation("CS GM Proc") is True  # "CS" wins over the "GM" token
+    assert is_recognized_ambulatory_rotation("SDE - AMB Cards") is True
+    assert is_recognized_ambulatory_rotation("SDE - CS GI") is True
+    assert is_recognized_ambulatory_rotation("BHIP") is True
+    assert is_recognized_ambulatory_rotation("Sport Med") is True
+
+
+def test_is_recognized_ambulatory_rotation_false_for_inpatient_and_unknown():
+    assert is_recognized_ambulatory_rotation("VA MICU") is False
+    assert is_recognized_ambulatory_rotation("Duke GM") is False
+    assert is_recognized_ambulatory_rotation("Some Bespoke Elective") is False
+    assert is_recognized_ambulatory_rotation(None) is False
+
+
+def test_is_inpatient_rotation_matches_icu_nightfloat_and_gm_services():
+    assert is_inpatient_rotation("VA MICU") is True
+    assert is_inpatient_rotation("Duke GM") is True
+    assert is_inpatient_rotation("GM12") is True
+    assert is_inpatient_rotation("NF1") is True
+    assert is_inpatient_rotation("NF-GP") is True
+    assert is_inpatient_rotation("9100") is True
+    assert is_inpatient_rotation("9100 NF") is True
+    assert is_inpatient_rotation("DRH ACR") is True
+    assert is_inpatient_rotation("Hospitalist") is True
+
+
+def test_is_inpatient_rotation_false_when_ambulatory_prefix_should_win():
+    """"CS GM Proc"/"AMB Med-Psych" contain a token ("GM"/"ED"-via-"MED")
+    that would otherwise look inpatient-ish — callers must check
+    is_recognized_ambulatory_rotation() first; this only documents that
+    is_inpatient_rotation() itself doesn't false-positive on "MED"."""
+    assert is_inpatient_rotation("AMB Med-Psych") is False
+
+
+def test_is_inpatient_rotation_false_for_unknown():
+    assert is_inpatient_rotation("Global Health") is False
+    assert is_inpatient_rotation(None) is False

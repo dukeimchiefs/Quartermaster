@@ -29,6 +29,7 @@ from audit.log import record as audit_record
 from real_schedule.assist_list import load_master_assist_list, load_weekly_assist_roster
 from real_schedule.checks import check_assist_swap
 from real_schedule.master_schedule import load_master_schedule
+from real_schedule.roster import RosterIndex, load_roster
 
 require_chief_auth()
 
@@ -39,17 +40,20 @@ _RESIDENT_SCHEDULES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.d
 _MASTER_ASSIST_PATH = os.path.join(_RESIDENT_SCHEDULES_DIR, "master_ASSIST_List_2026-2027.xlsx")
 _WEEKLY_ASSIST_PATH = os.path.join(_RESIDENT_SCHEDULES_DIR, "weekly_ASSIST_List_2026-2027.xlsx")
 _MASTER_SCHEDULE_PATH = os.path.join(_RESIDENT_SCHEDULES_DIR, "master_MASTER_Schedule_2026-2027.xlsx")
+_ROSTER_PATH = os.path.join(_RESIDENT_SCHEDULES_DIR, "duke_residency_2026-2027.csv")
 
 
 @st.cache_data(show_spinner="Reading real schedule workbooks...")
-def _load_all(master_assist_mtime: float, weekly_assist_mtime: float, master_schedule_mtime: float):
+def _load_all(master_assist_mtime: float, weekly_assist_mtime: float, master_schedule_mtime: float, roster_mtime: float):
     """mtimes are part of the cache key so an updated real workbook (the
     OneDrive sync writes a new file, it isn't edited in place) invalidates
     the cache automatically — Streamlit's cache_data can't see file
     changes on its own since load_workbook only takes a path."""
-    del master_assist_mtime, weekly_assist_mtime, master_schedule_mtime  # cache-key only
-    master_assist, w1 = load_master_assist_list(_MASTER_ASSIST_PATH)
-    master_schedule, w2 = load_master_schedule(_MASTER_SCHEDULE_PATH)
+    del master_assist_mtime, weekly_assist_mtime, master_schedule_mtime, roster_mtime  # cache-key only
+    roster_entries, w0 = load_roster(_ROSTER_PATH)
+    roster = RosterIndex(roster_entries)
+    master_assist, w1 = load_master_assist_list(_MASTER_ASSIST_PATH, roster=roster)
+    master_schedule, w2 = load_master_schedule(_MASTER_SCHEDULE_PATH, roster=roster)
     import openpyxl
 
     wb = openpyxl.load_workbook(_WEEKLY_ASSIST_PATH, read_only=True)
@@ -57,9 +61,9 @@ def _load_all(master_assist_mtime: float, weekly_assist_mtime: float, master_sch
         name for name in wb.sheetnames if name not in ("How To", "Pull Counter", "Sick Counter", "Pre-assists", "Assist List Swaps", "Template")
     ]
     weekly_assist = []
-    warnings = w1 + w2
+    warnings = w0 + w1 + w2
     for sheet_name in weekly_sheet_names:
-        records, w = load_weekly_assist_roster(_WEEKLY_ASSIST_PATH, sheet_name)
+        records, w = load_weekly_assist_roster(_WEEKLY_ASSIST_PATH, sheet_name, roster=roster)
         weekly_assist.extend(records)
         warnings.extend(w)
     return master_assist, weekly_assist, master_schedule, warnings
@@ -71,7 +75,7 @@ if not os.path.isdir(_RESIDENT_SCHEDULES_DIR):
 
 try:
     mtimes = tuple(
-        os.path.getmtime(p) for p in (_MASTER_ASSIST_PATH, _WEEKLY_ASSIST_PATH, _MASTER_SCHEDULE_PATH)
+        os.path.getmtime(p) for p in (_MASTER_ASSIST_PATH, _WEEKLY_ASSIST_PATH, _MASTER_SCHEDULE_PATH, _ROSTER_PATH)
     )
 except OSError as exc:
     st.error(f"Couldn't read one of the real schedule workbooks: {exc}")

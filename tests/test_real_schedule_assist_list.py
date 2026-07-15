@@ -21,6 +21,7 @@ import datetime as dt
 import openpyxl
 
 from real_schedule.assist_list import load_weekly_assist_roster, load_weekly_callout_log
+from real_schedule.roster import RosterEntry, RosterIndex
 
 _ROSTER_HEADER_STANDARD = (
     "Last Name",
@@ -102,6 +103,22 @@ def test_load_weekly_assist_roster_standard_column_order(tmp_path):
     assert r.rotation == "VA GM"
     assert r.pulls_this_year == 2.0
     assert r.week_start == dt.date(2026, 7, 6)
+
+
+def test_load_weekly_assist_roster_canonicalizes_against_roster(tmp_path):
+    """When a roster= is passed, resident_name is canonicalized against it —
+    this is the fix for master_schedule's confirmed ~19% "First Last"
+    formatting bug propagating to cross-file joins."""
+    path = _build_fixture(
+        tmp_path,
+        "B1. 7.6-7.12",
+        roster_header=_ROSTER_HEADER_STANDARD,
+        roster_rows=[("Chen", "Alice", "PGY1", "VA GM", 0, 0, 0, 2, 0, "AMB Endo")],
+    )
+    roster_index = RosterIndex([RosterEntry(canonical_name="Chen, Alice Marie", first="Alice Marie", last="Chen")])
+    records, warnings = load_weekly_assist_roster(path, "B1. 7.6-7.12", roster=roster_index)
+    assert warnings == []
+    assert records[0].resident_name == "Chen, Alice Marie"
 
 
 def test_load_weekly_assist_roster_year_first_column_order(tmp_path):

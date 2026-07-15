@@ -11,9 +11,9 @@ import ast
 from pathlib import Path
 
 import real_schedule
-from real_schedule import ambulatory, assist_list, available_clinics, checks, common, master_schedule
+from real_schedule import ambulatory, assist_list, available_clinics, checks, common, fsc_tracker, master_schedule, roster
 
-_MODULES = [common, master_schedule, ambulatory, assist_list, available_clinics, checks]
+_MODULES = [common, roster, master_schedule, ambulatory, assist_list, available_clinics, fsc_tracker, checks]
 _FORBIDDEN_CALLABLE_PREFIXES = ("save", "write")
 
 
