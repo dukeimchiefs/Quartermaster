@@ -15,7 +15,7 @@ from real_schedule.checks import (
     FAIRNESS_FLAG_THRESHOLD_PULLS,
     check_assist_swap,
     check_clinic_reassignment,
-    check_fsc_day_request,
+    check_fsc_reflection_day_request,
 )
 from real_schedule.fsc_tracker import FscBalance
 from real_schedule.master_schedule import MasterScheduleWeek
@@ -259,7 +259,7 @@ def test_clinic_reassignment_warns_on_possible_double_booking():
     assert finding.severity == "warning"
 
 
-# --- Tool 3: check_fsc_day_request ------------------------------------------
+# --- Tool 3: check_fsc_reflection_day_request -------------------------------
 
 _FSC_DATE = dt.date(2026, 7, 6)  # a Monday
 _FSC_WEEK_START = dt.date(2026, 7, 6)
@@ -284,24 +284,40 @@ def _fsc_base_inputs():
 
 def test_clean_fsc_request_has_no_blocking_findings():
     master_schedule, master_assist, ambulatory_week, fsc_balances = _fsc_base_inputs()
-    result = check_fsc_day_request(
+    result = check_fsc_reflection_day_request(
         "Zeta, Fictional", _FSC_DATE, "AM",
         master_schedule=master_schedule, master_assist=master_assist,
         ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
     )
     assert result.is_clear
+    assert len(result.reminders) == 2
+
+
+def test_bare_consult_service_rotation_is_eligible():
+    """Per the Well-being Policy, "ambulatory, consults, and SDE" rotations
+    are FSC/Reflection-eligible — a bare specialty name like "GI" (no AMB/CS
+    prefix) is this program's convention for that specialty's consult
+    service, confirmed by the chief resident."""
+    master_schedule, master_assist, ambulatory_week, fsc_balances = _fsc_base_inputs()
+    master_schedule = [MasterScheduleWeek(resident_name="Zeta, Fictional", pgy=1, week_start=_FSC_WEEK_START, rotation="GI")]
+    result = check_fsc_reflection_day_request(
+        "Zeta, Fictional", _FSC_DATE, "AM",
+        master_schedule=master_schedule, master_assist=master_assist,
+        ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
+    )
+    assert not any(f.rule in ("not_eligible_rotation", "rotation_type_unconfirmed") for f in result.findings)
 
 
 def test_inpatient_rotation_blocks():
     master_schedule, master_assist, ambulatory_week, fsc_balances = _fsc_base_inputs()
     master_schedule = [MasterScheduleWeek(resident_name="Zeta, Fictional", pgy=1, week_start=_FSC_WEEK_START, rotation="VA MICU")]
-    result = check_fsc_day_request(
+    result = check_fsc_reflection_day_request(
         "Zeta, Fictional", _FSC_DATE, "AM",
         master_schedule=master_schedule, master_assist=master_assist,
         ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
     )
     assert not result.is_clear
-    assert any(f.rule == "not_ambulatory" and f.severity == "blocking" for f in result.findings)
+    assert any(f.rule == "not_eligible_rotation" and f.severity == "blocking" for f in result.findings)
 
 
 def test_on_assist_list_blocks_regardless_of_duty_tag():
@@ -311,7 +327,7 @@ def test_on_assist_list_blocks_regardless_of_duty_tag():
     master_assist = [
         MasterAssistDuty(resident_name="Zeta, Fictional", pgy_tier="PGY-1", week_start=_FSC_WEEK_START, duty="Pickett", extra=None),
     ]
-    result = check_fsc_day_request(
+    result = check_fsc_reflection_day_request(
         "Zeta, Fictional", _FSC_DATE, "AM",
         master_schedule=master_schedule, master_assist=master_assist,
         ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
@@ -325,7 +341,7 @@ def test_own_continuity_clinic_day_blocks():
     ambulatory_week = [
         AmbulatoryWeekRow(resident_name="Zeta, Fictional", pgy=1, rotation="AMB Endo", day_parts={(_FSC_DATE, "AM"): "DOC"}),
     ]
-    result = check_fsc_day_request(
+    result = check_fsc_reflection_day_request(
         "Zeta, Fictional", _FSC_DATE, "AM",
         master_schedule=master_schedule, master_assist=master_assist,
         ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
@@ -342,7 +358,7 @@ def test_own_continuity_clinic_day_does_not_block_a_different_half_day():
     ambulatory_week = [
         AmbulatoryWeekRow(resident_name="Zeta, Fictional", pgy=1, rotation="AMB Endo", day_parts={(_FSC_DATE, "AM"): "DOC", (_FSC_DATE, "PM"): "AHD"}),
     ]
-    result = check_fsc_day_request(
+    result = check_fsc_reflection_day_request(
         "Zeta, Fictional", _FSC_DATE, "PM",
         master_schedule=master_schedule, master_assist=master_assist,
         ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
@@ -355,7 +371,7 @@ def test_insufficient_fsc_balance_is_a_warning_not_blocking():
     fsc_balances = [
         FscBalance(resident_name="Zeta, Fictional", pgy=1, program="Categorical", base_fsc=4.0, fsc_available=4.0, fsc_used=4.0, fsc_left=0.0, phase="Appointment Time"),
     ]
-    result = check_fsc_day_request(
+    result = check_fsc_reflection_day_request(
         "Zeta, Fictional", _FSC_DATE, "FULL",
         master_schedule=master_schedule, master_assist=master_assist,
         ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
@@ -368,7 +384,7 @@ def test_insufficient_fsc_balance_is_a_warning_not_blocking():
 def test_unrecognized_rotation_type_is_a_warning():
     master_schedule, master_assist, ambulatory_week, fsc_balances = _fsc_base_inputs()
     master_schedule = [MasterScheduleWeek(resident_name="Zeta, Fictional", pgy=1, week_start=_FSC_WEEK_START, rotation="Some Bespoke Elective")]
-    result = check_fsc_day_request(
+    result = check_fsc_reflection_day_request(
         "Zeta, Fictional", _FSC_DATE, "AM",
         master_schedule=master_schedule, master_assist=master_assist,
         ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
@@ -383,12 +399,12 @@ def test_full_day_costs_more_than_half_day():
     fsc_balances = [
         FscBalance(resident_name="Zeta, Fictional", pgy=1, program="Categorical", base_fsc=4.0, fsc_available=4.0, fsc_used=3.5, fsc_left=0.5, phase="Appointment Time"),
     ]
-    half_day_result = check_fsc_day_request(
+    half_day_result = check_fsc_reflection_day_request(
         "Zeta, Fictional", _FSC_DATE, "AM",
         master_schedule=master_schedule, master_assist=master_assist,
         ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
     )
-    full_day_result = check_fsc_day_request(
+    full_day_result = check_fsc_reflection_day_request(
         "Zeta, Fictional", _FSC_DATE, "FULL",
         master_schedule=master_schedule, master_assist=master_assist,
         ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,

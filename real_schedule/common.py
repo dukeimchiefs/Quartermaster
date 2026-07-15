@@ -283,21 +283,36 @@ _INPATIENT_TOKENS = frozenset(
 )
 _AMBULATORY_EXACT_CODES = frozenset({"BHIP", "BHOP", "GENETICS", "ADOL", "COMET", "SPORT MED"})
 
+_CONSULT_SERVICE_NAMES = frozenset({"CARD", "CARDS", "DERM", "ENDO", "GI", "ID", "NEURO", "PULM", "RENAL", "RHEUM"})
+"""Bare specialty names (no AMB/CS prefix) confirmed live to also appear
+with an "AMB X"/"CS X" ambulatory counterpart elsewhere in the same
+taxonomy (e.g. "GI" alongside "AMB GI"/"CS GI") — this program's
+convention for that specialty's inpatient CONSULT service, per the chief
+resident's confirmation. The Well-being Policy explicitly lists rotations
+"ambulatory, consults, and SDE" as eligible for FSC/Reflection days — a
+consult rotation is more interruptible than a primary inpatient team role,
+which is exactly why it's called out as an eligible exception rather than
+treated like ordinary inpatient service. Deliberately excludes bare names
+with no confirmed AMB/CS counterpart in the real taxonomy (e.g. "Urology",
+"OPHTHO", "Gero") — those stay "unknown, confirm manually" rather than a
+guess."""
+
 
 def is_recognized_ambulatory_rotation(rotation: object) -> bool:
-    """True for a rotation-cell value confidently recognized as an
-    ambulatory (outpatient clinic) week, via a curated, token-based (never
-    substring) match against this program's own naming conventions —
-    confirmed live across master_MASTER_Schedule's 264 distinct real
-    rotation values: an "AMB" token anywhere (AMB Endo, MP AMB, POCUS/MP
-    Amb, ...), a leading "CS" token (CS Endo, CS Heme, ...), a leading
-    "SDE" token followed by "AMB" or "CS" (SDE - AMB Cards, SDE - CS GI),
-    or a small exact-match set of other recognized ambulatory block names
-    (BHIP, BHOP, Genetics, Adol, Comet, Sport Med). Checked BEFORE
-    is_inpatient_rotation by callers — several confirmed-ambulatory values
-    ("CS GM Proc", "AMB TEACH DOC") contain a token ("GM") that would
-    otherwise look inpatient, so the ambulatory-prefix match must win
-    first. Returns False (not a hard "no") for anything not confidently
+    """True for a rotation-cell value confidently recognized as FSC/
+    Reflection-day-eligible per the Well-being Policy's "ambulatory,
+    consults, and SDE" rule, via a curated, token-based (never substring)
+    match against this program's own naming conventions — confirmed live
+    across master_MASTER_Schedule's 264 distinct real rotation values: an
+    "AMB" token anywhere (AMB Endo, MP AMB, POCUS/MP Amb, ...), a leading
+    "CS" token (CS Endo, CS Heme, ...), a leading "SDE" token followed by
+    "AMB" or "CS" (SDE - AMB Cards, SDE - CS GI), a bare consult-service
+    name (see _CONSULT_SERVICE_NAMES), or a small exact-match set of other
+    recognized ambulatory block names (BHIP, BHOP, Genetics, Adol, Comet,
+    Sport Med). Checked BEFORE is_inpatient_rotation by callers — several
+    confirmed-eligible values ("CS GM Proc", "AMB TEACH DOC") contain a
+    token ("GM") that would otherwise look inpatient, so this match must
+    win first. Returns False (not a hard "no") for anything not confidently
     recognized — pair with is_inpatient_rotation and treat neither
     matching as "unknown, confirm manually," never as a guessed answer.
     """
@@ -316,6 +331,8 @@ def is_recognized_ambulatory_rotation(rotation: object) -> bool:
     if tokens[0] == "CS":
         return True
     if tokens[0] == "SDE" and len(tokens) > 1 and tokens[1] in {"AMB", "CS"}:
+        return True
+    if len(tokens) == 1 and tokens[0] in _CONSULT_SERVICE_NAMES:
         return True
     return False
 

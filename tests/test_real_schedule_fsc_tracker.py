@@ -9,6 +9,7 @@ from __future__ import annotations
 import openpyxl
 
 from real_schedule.fsc_tracker import load_fsc_tracker
+from real_schedule.roster import RosterEntry, RosterIndex
 
 _HEADER = (
     "Resident",
@@ -90,6 +91,17 @@ def test_load_fsc_tracker_warns_not_crashes_on_bad_numeric_value(tmp_path):
     assert records[0].fsc_used is None
     assert records[0].fsc_left is None
     assert len(warnings) == 2
+
+
+def test_load_fsc_tracker_canonicalizes_against_roster(tmp_path):
+    path = _build_fixture(
+        tmp_path,
+        [("Alice Chen", "Categorical", "PGY-1", "abc1", 4, None, None, 4, 0, 4, "Appointment Time", None)],
+    )
+    roster_index = RosterIndex([RosterEntry(canonical_name="Chen, Alice", first="Alice", last="Chen")])
+    records, warnings = load_fsc_tracker(path, roster=roster_index)
+    assert warnings == []
+    assert records[0].resident_name == "Chen, Alice"
 
 
 def test_load_fsc_tracker_sheet_not_found(tmp_path):

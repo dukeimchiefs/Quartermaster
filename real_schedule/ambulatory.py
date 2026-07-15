@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import openpyxl
 
 from real_schedule.common import ParseWarning, normalize_pgy
+from real_schedule.roster import RosterIndex
 
 _HEADER_ROW = 6
 _DATA_START_ROW = 7
@@ -60,7 +61,7 @@ def _column_index_map(header_row: tuple) -> dict[str, int]:
     return index_map
 
 
-def load_ambulatory_week(path: str, sheet_name: str) -> tuple[list[AmbulatoryWeekRow], list[ParseWarning]]:
+def load_ambulatory_week(path: str, sheet_name: str, *, roster: RosterIndex | None = None) -> tuple[list[AmbulatoryWeekRow], list[ParseWarning]]:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     warnings: list[ParseWarning] = []
     if sheet_name not in wb.sheetnames:
@@ -103,6 +104,10 @@ def load_ambulatory_week(path: str, sheet_name: str) -> tuple[list[AmbulatoryWee
         if last is None or first is None or not str(last).strip() or not str(first).strip():
             continue  # spacer row
         name = f"{str(last).strip()}, {str(first).strip()}"
+        if roster is not None:
+            name, matched = roster.canonicalize(name)
+            if not matched:
+                warnings.append(ParseWarning(sheet=sheet_name, row=row_number, reason=f"{name!r} not found in internal roster — using name as parsed"))
         pgy = normalize_pgy(row[year_col - 1]) if year_col and year_col - 1 < len(row) else None
         rotation_value = row[rotation_col - 1] if rotation_col and rotation_col - 1 < len(row) else None
         rotation = str(rotation_value).strip() if rotation_value is not None and str(rotation_value).strip() else None

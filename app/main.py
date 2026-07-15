@@ -50,7 +50,7 @@ def main() -> None:
         "- **Review Changes** — approve or reject staged proposals from the other two pages\n"
         "- **Check Assist Swap** — verify a proposed jeopardy/assist week-swap against the real, live schedules\n"
         "- **Check Clinic Coverage** — verify a proposed resident reassignment after an ambulatory preceptor calls out\n"
-        "- **Check FSC Day** — verify a resident can take a proposed FSC day or half-day away from clinic"
+        "- **Check FSC/Reflection Day** — verify a resident can take a proposed FSC/Reflection day or half-day away from clinic"
     )
 
 

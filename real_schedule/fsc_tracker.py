@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import openpyxl
 
 from real_schedule.common import ParseWarning, normalize_pgy
+from real_schedule.roster import RosterIndex
 
 _HEADER_ROW = 1
 _DATA_START_ROW = 2
@@ -74,7 +75,7 @@ def _parse_float(value: object) -> float | None:
         return None
 
 
-def load_fsc_tracker(path: str) -> tuple[list[FscBalance], list[ParseWarning]]:
+def load_fsc_tracker(path: str, *, roster: RosterIndex | None = None) -> tuple[list[FscBalance], list[ParseWarning]]:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     warnings: list[ParseWarning] = []
     if "FSCTracker" not in wb.sheetnames:
@@ -95,6 +96,10 @@ def load_fsc_tracker(path: str) -> tuple[list[FscBalance], list[ParseWarning]]:
         if name is None or not str(name).strip():
             continue  # spacer/blank row
         name = str(name).strip()
+        if roster is not None:
+            name, matched = roster.canonicalize(name)
+            if not matched:
+                warnings.append(ParseWarning(sheet="FSCTracker", row=row_number, reason=f"{name!r} not found in internal roster — using name as parsed"))
 
         pgy_col = header_map.get("pgy")
         pgy = normalize_pgy(row[pgy_col]) if pgy_col is not None and pgy_col < len(row) else None
