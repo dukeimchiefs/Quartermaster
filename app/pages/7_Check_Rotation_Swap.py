@@ -11,10 +11,24 @@ audit_log.
 Confirmed with the chief resident: same PGY tier required, mutual
 two-resident trades only (no one-directional "move me" requests without a
 matching partner).
+
+Has two ways to run a check — a structured form (dropdowns) and a free-text
+box parsed by the local assistant (llm.tools.handle_check_rotation_swap_message)
+— both converge on the same check_rotation_swap() result and the same
+render/review section below, so results are stored in st.session_state
+rather than rendered directly inside either button's if-block (same reason
+as Call Out: Streamlit reruns the whole script on every widget interaction,
+and a button nested inside that block would go stale on the very rerun meant
+to handle its click).
+
+Nested "Review": since this page is read-only over Excel by design, review
+means recording an Approve/Reject decision to audit_log — the chief still
+has to update the real Master Schedule / Epic record by hand.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 
@@ -22,6 +36,7 @@ import streamlit as st
 
 from app.auth import get_actor, require_chief_auth
 from audit.log import record as audit_record
+from llm.tools import handle_check_rotation_swap_message
 from real_schedule.assist_list import load_master_assist_list
 from real_schedule.checks import check_rotation_swap
 from real_schedule.master_schedule import load_master_schedule
@@ -72,6 +87,22 @@ if not resident_names or not week_starts:
     st.warning("No residents or weeks could be parsed from the Master Schedule.")
     st.stop()
 
+
+def _result_to_dict(result, *, inputs: dict, source: str) -> dict:
+    return {
+        "source": source,
+        "inputs": inputs,
+        "is_clear": result.is_clear,
+        "findings": [{"rule": f.rule, "severity": f.severity, "message": f.message} for f in result.findings],
+        "reminders": list(result.reminders),
+    }
+
+
+def _stage_result(result_dict: dict) -> None:
+    st.session_state["rotation_swap_result"] = result_dict
+    st.session_state.pop("rotation_swap_review_status", None)
+
+
 col1, col2 = st.columns(2)
 with col1:
     resident_1 = st.selectbox("Resident #1", options=resident_names)
@@ -99,39 +130,104 @@ st.caption(f"{len(weeks_in_range)} week(s) in this swap: {', '.join(w.strftime('
 
 if st.button("Check this rotation swap", type="primary"):
     result = check_rotation_swap(
-        resident_1,
-        resident_2,
-        weeks_in_range,
-        master_schedule=master_schedule,
-        master_assist=master_assist,
+        resident_1, resident_2, weeks_in_range,
+        master_schedule=master_schedule, master_assist=master_assist,
     )
-
+    inputs = {
+        "resident_1": resident_1, "resident_2": resident_2,
+        "week_start_first": week_start_first.isoformat(), "week_start_last": week_start_last.isoformat(),
+    }
     audit_record(
         actor=get_actor(),
         action="check_rotation_swap",
         reason=f"checked rotation swap: {resident_1} <-> {resident_2}, weeks {week_start_first} to {week_start_last}",
-        details=json.dumps(
-            {
-                "resident_1": resident_1,
-                "resident_2": resident_2,
-                "week_start_first": week_start_first.isoformat(),
-                "week_start_last": week_start_last.isoformat(),
-                "is_clear": result.is_clear,
-                "findings": [{"rule": f.rule, "severity": f.severity, "message": f.message} for f in result.findings],
-            }
-        ),
+        details=json.dumps({**inputs, "is_clear": result.is_clear, "findings": [
+            {"rule": f.rule, "severity": f.severity, "message": f.message} for f in result.findings
+        ]}),
     )
+    _stage_result(_result_to_dict(result, inputs=inputs, source="structured"))
 
-    if result.is_clear:
+st.divider()
+st.subheader("Or describe it in your own words")
+st.caption(
+    "Parses free text into the two residents and week range via the local assistant, then always runs the "
+    "same real_schedule.checks.check_rotation_swap() as the form above — it never invents a verdict itself."
+)
+free_text = st.text_area("What's the proposed swap?", placeholder='e.g. "Alex and Jamie want to swap block 4"', key="rotation_swap_free_text")
+if st.button("Parse & check"):
+    if not free_text.strip():
+        st.warning("Enter a description first.")
+    else:
+        try:
+            with st.spinner("Asking the local assistant..."):
+                handled = handle_check_rotation_swap_message(master_schedule, master_assist, free_text, today=dt.date.today())
+        except Exception as exc:  # Ollama not running, model not pulled, etc.
+            st.error(f"Local assistant unavailable ({exc}). Use the structured form above instead.")
+        else:
+            if not handled.resolved:
+                st.info(handled.reply)
+            else:
+                result = handled.result
+                inputs = {**handled.resolved_args, "free_text": free_text.strip()}
+                inputs["week_starts"] = [w.isoformat() for w in inputs["week_starts"]]
+                audit_record(
+                    actor=get_actor(),
+                    action="check_rotation_swap",
+                    reason=f'checked rotation swap (free text): "{free_text.strip()}"',
+                    details=json.dumps({**inputs, "is_clear": result.is_clear, "findings": [
+                        {"rule": f.rule, "severity": f.severity, "message": f.message} for f in result.findings
+                    ]}),
+                )
+                result_dict = _result_to_dict(result, inputs=inputs, source="free_text")
+                result_dict["narration"] = handled.reply
+                _stage_result(result_dict)
+
+stored = st.session_state.get("rotation_swap_result")
+if stored:
+    st.divider()
+    if stored["source"] == "free_text":
+        st.success(stored["narration"])
+    if stored["is_clear"]:
         st.success("No blocking issues found.")
     else:
         st.error("This rotation swap has at least one blocking issue — review before proceeding.")
 
-    for finding in result.findings:
-        container = st.error if finding.severity == "blocking" else st.warning
-        container(finding.message)
+    for finding in stored["findings"]:
+        container = st.error if finding["severity"] == "blocking" else st.warning
+        container(finding["message"])
+
+    if stored["reminders"]:
+        st.divider()
+        st.caption("Reminders (not machine-checkable):")
+        for reminder in stored["reminders"]:
+            st.info(reminder)
 
     st.divider()
-    st.caption("Reminders (not machine-checkable):")
-    for reminder in result.reminders:
-        st.info(reminder)
+    st.subheader("Review")
+    review_status = st.session_state.get("rotation_swap_review_status")
+    if review_status:
+        st.info(f"Already recorded as **{review_status}**.")
+    else:
+        st.caption(
+            "This app never writes to Resident_Schedules/ — approving here only records the chief's decision "
+            "to the audit log. Update the real Master Schedule / Epic record yourself."
+        )
+        rev_col1, rev_col2 = st.columns(2)
+        with rev_col1:
+            approve = st.button("Approve", type="primary", key="approve_rotation_swap")
+        with rev_col2:
+            reject = st.button("Reject", key="reject_rotation_swap")
+        if approve:
+            audit_record(
+                actor=get_actor(), action="approve_rotation_swap",
+                reason=f"approved rotation swap: {stored['inputs']}", details=json.dumps(stored),
+            )
+            st.session_state["rotation_swap_review_status"] = "approved"
+            st.rerun()
+        if reject:
+            audit_record(
+                actor=get_actor(), action="reject_rotation_swap",
+                reason=f"rejected rotation swap: {stored['inputs']}", details=json.dumps(stored),
+            )
+            st.session_state["rotation_swap_review_status"] = "rejected"
+            st.rerun()

@@ -75,7 +75,10 @@ def _load_schedule() -> CurrentSchedule:
 schedule = _load_schedule()
 
 if not schedule.residents or not schedule.assignments:
-    st.warning("No schedule data found. Run `python -m db.seed` to load the toy dataset.")
+    st.warning(
+        "No schedule data found. Run `python -m db.sync_real_schedule` to import the live Master Schedule "
+        "(or `python -m db.seed` to load the toy dataset for local development)."
+    )
     st.stop()
 
 rotations_by_id = {r.id: r for r in schedule.rotations}

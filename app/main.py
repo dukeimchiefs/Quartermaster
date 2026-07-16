@@ -46,13 +46,13 @@ def main() -> None:
     st.markdown(
         "Use the sidebar to navigate:\n"
         "- **Call Out** — find replacement coverage for a sick resident\n"
-        "- **Build Schedule** — build a full block schedule for a year from scratch\n"
+        "- **Build Schedule** — build a full block schedule for a year from scratch (also nests **Check Day Off "
+        "Alignment** — verify a proposed SAC day-off request against the inpatient schedule)\n"
         "- **Review Changes** — approve or reject staged proposals from the other two pages\n"
         "- **Check Assist Swap** — verify a proposed jeopardy/assist week-swap against the real, live schedules\n"
-        "- **Check Clinic Coverage** — verify a proposed resident reassignment after an ambulatory preceptor calls out\n"
+        "- **Check Clinic Coverage** — find and verify a candidate reassignment after an ambulatory preceptor calls out\n"
         "- **Check FSC/Reflection Day** — verify a resident can take a proposed FSC/Reflection day or half-day away from clinic\n"
-        "- **Check Rotation Swap** — verify a proposed mutual rotation swap between two residents\n"
-        "- **Check Day Off Alignment** — verify a proposed SAC (specific day-off) request against the inpatient schedule"
+        "- **Check Rotation Swap** — verify a proposed mutual rotation swap between two residents"
     )
 
 

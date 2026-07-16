@@ -18,13 +18,24 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from llm.client import DEFAULT_MODEL, OllamaClient
+from real_schedule.checks import (
+    AssistSwapCheckResult,
+    FscReflectionDayCheckResult,
+    RotationSwapCheckResult,
+    check_assist_swap,
+    check_fsc_reflection_day_request,
+    check_rotation_swap,
+)
+from real_schedule.recommend import RankedClinicCandidate, recommend_clinic_coverage
 from solver.repair import CurrentSchedule, OpenShift, SwapProposal, repair_schedule
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "callout_handler.md"
+_CHECK_PROMPT_PATH = Path(__file__).parent / "prompts" / "check_handler.md"
 
 CALL_REPAIR_SOLVER_TOOL = {
     "type": "function",
@@ -478,3 +489,412 @@ def recommend_swaps(
 
 def explain_rule_violation(*args, **kwargs):
     raise NotImplementedError("llm/tools.py: Development Priority #6")
+
+
+# ---------------------------------------------------------------------------
+# Free-text handlers for the four real_schedule/ Check tools (pages 4-7).
+#
+# Same discipline as handle_callout_message above: the model's only jobs are
+# (a) extracting identifying fields from free text via one tool call, and
+# (b) narrating a result it's handed. Every lookup/validation/decision is
+# plain Python against the page's already-loaded real_schedule records —
+# never trusted from the model directly. Since there's no DB here, "trusted
+# from the model directly" would mean matching by exact string/date equality
+# against whatever the model wrote; instead, names are resolved by
+# case-insensitive substring match (same convention as query_schedule_db's
+# name lookup above) and dates/weeks are checked for exact membership in the
+# valid set the page already computed — zero or multiple matches is treated
+# as unresolved and re-asked, never guessed.
+# ---------------------------------------------------------------------------
+
+
+def _match_names(raw: str | None, valid_names: list[str]) -> list[str]:
+    needle = (raw or "").strip().lower()
+    if not needle:
+        return []
+    return [name for name in valid_names if needle in name.lower()]
+
+
+def _match_date(raw: str | None, valid_dates) -> dt.date | None:
+    if not raw:
+        return None
+    try:
+        parsed = dt.date.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed in valid_dates else None
+
+
+def _match_week_start(raw: str | None, valid_week_starts) -> dt.date | None:
+    if not raw:
+        return None
+    try:
+        parsed = dt.date.fromisoformat(raw)
+    except ValueError:
+        return None
+    week_start = parsed - dt.timedelta(days=parsed.weekday())
+    return week_start if week_start in valid_week_starts else None
+
+
+@dataclass
+class CheckHandlingResult:
+    """Result of a handle_check_*_message() call. `reply` is always the
+    model's prose — a clarifying question if resolution failed, otherwise a
+    narration of `result`. `result` is populated only once the deterministic
+    checker actually ran; a None result means "needs more info from the
+    chief," never "checked and found nothing.\""""
+
+    reply: str
+    resolved: bool
+    result: object | None = None
+    resolved_args: dict | None = None
+
+
+def _run_check_handler(
+    *,
+    free_text: str,
+    today: dt.date,
+    tool_schema: dict,
+    resolve_args: Callable[[dict], tuple[dict | None, str | None]],
+    run_check: Callable[[dict], object],
+    summarize: Callable[[object], str],
+    client: OllamaClient | None,
+) -> CheckHandlingResult:
+    system_prompt = _CHECK_PROMPT_PATH.read_text()
+    tool_name = tool_schema["function"]["name"]
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                f"Today's date is {today.isoformat()}. A chief resident just wrote: "
+                f'"{free_text}". Call {tool_name} with everything you can confidently '
+                "extract. If you can't tell exactly what's meant, don't call the tool "
+                "— ask a clarifying question instead."
+            ),
+        },
+    ]
+    client = client or OllamaClient(model=DEFAULT_MODEL)
+
+    response = client.chat(messages=messages, tools=[tool_schema], options={"temperature": 0})
+    messages.append(response.message.model_dump())
+
+    calls = [c for c in (response.message.tool_calls or []) if c.function.name == tool_name]
+    if not calls:
+        return CheckHandlingResult(
+            reply=response.message.content or "Could you clarify the details of this request?",
+            resolved=False,
+        )
+
+    resolved_kwargs, error_reply = resolve_args(calls[0].function.arguments)
+    messages.append({"role": "tool", "content": json.dumps(calls[0].function.arguments), "tool_name": tool_name})
+
+    if resolved_kwargs is None:
+        clarify = client.chat(
+            messages=messages
+            + [
+                {
+                    "role": "user",
+                    "content": (
+                        f"{error_reply} Ask the chief resident a clarifying question to "
+                        "narrow it down. Do not guess."
+                    ),
+                }
+            ]
+        )
+        return CheckHandlingResult(reply=clarify.message.content or error_reply, resolved=False)
+
+    result = run_check(resolved_kwargs)
+    summary_text = summarize(result)
+    messages.append({"role": "tool", "content": summary_text, "tool_name": f"{tool_name}_result"})
+
+    narration = client.chat(
+        messages=messages
+        + [
+            {
+                "role": "user",
+                "content": (
+                    "Now write a concise (2-3 sentence), chief-resident-facing "
+                    "narration of this result. Do not add, remove, or reinterpret any "
+                    "finding."
+                ),
+            }
+        ]
+    )
+    return CheckHandlingResult(
+        reply=narration.message.content or summary_text,
+        resolved=True,
+        result=result,
+        resolved_args=resolved_kwargs,
+    )
+
+
+def _summarize_findings(result) -> str:
+    return json.dumps(
+        {
+            "is_clear": result.is_clear,
+            "findings": [{"rule": f.rule, "severity": f.severity, "message": f.message} for f in result.findings],
+        }
+    )
+
+
+RESOLVE_ROTATION_SWAP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "resolve_rotation_swap_request",
+        "description": "Resolve a proposed mutual rotation swap into the two residents and week range it refers to.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "resident_1": {"type": "string", "description": "First resident's name, as mentioned by the chief."},
+                "resident_2": {"type": "string", "description": "Second resident's name, as mentioned by the chief."},
+                "week_start_first": {"type": "string", "description": "ISO date (YYYY-MM-DD) of the first week of the swap."},
+                "week_start_last": {"type": "string", "description": "ISO date (YYYY-MM-DD) of the last week of the swap."},
+            },
+            "required": ["resident_1", "resident_2", "week_start_first", "week_start_last"],
+        },
+    },
+}
+
+
+def handle_check_rotation_swap_message(
+    master_schedule,
+    master_assist,
+    free_text: str,
+    *,
+    today: dt.date | None = None,
+    client: OllamaClient | None = None,
+) -> CheckHandlingResult:
+    today = today or dt.date.today()
+    resident_names = sorted({r.resident_name for r in master_schedule})
+    week_starts = sorted({r.week_start for r in master_schedule})
+
+    def resolve_args(args: dict) -> tuple[dict | None, str | None]:
+        matches_1 = _match_names(args.get("resident_1"), resident_names)
+        matches_2 = _match_names(args.get("resident_2"), resident_names)
+        if len(matches_1) != 1:
+            return None, f"Resident #1 ({args.get('resident_1')!r}) matched {len(matches_1)} resident(s) in the Master Schedule."
+        if len(matches_2) != 1:
+            return None, f"Resident #2 ({args.get('resident_2')!r}) matched {len(matches_2)} resident(s) in the Master Schedule."
+        week_first = _match_week_start(args.get("week_start_first"), week_starts)
+        week_last = _match_week_start(args.get("week_start_last"), week_starts)
+        if week_first is None or week_last is None or week_first > week_last:
+            return None, "Couldn't resolve a valid week range from the Master Schedule."
+        return (
+            {
+                "resident_1": matches_1[0],
+                "resident_2": matches_2[0],
+                "week_starts": [w for w in week_starts if week_first <= w <= week_last],
+            },
+            None,
+        )
+
+    def run_check(kwargs: dict) -> RotationSwapCheckResult:
+        return check_rotation_swap(
+            kwargs["resident_1"], kwargs["resident_2"], kwargs["week_starts"],
+            master_schedule=master_schedule, master_assist=master_assist,
+        )
+
+    return _run_check_handler(
+        free_text=free_text, today=today, tool_schema=RESOLVE_ROTATION_SWAP_TOOL,
+        resolve_args=resolve_args, run_check=run_check, summarize=_summarize_findings, client=client,
+    )
+
+
+RESOLVE_ASSIST_SWAP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "resolve_assist_swap_request",
+        "description": "Resolve a proposed jeopardy/assist week swap into the two residents and the two weeks involved.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "resident_1": {"type": "string", "description": "Resident currently on jeopardy/assist, as mentioned by the chief."},
+                "resident_2": {"type": "string", "description": "Resident proposed to cover, as mentioned by the chief."},
+                "week_covered": {"type": "string", "description": "ISO date (YYYY-MM-DD) of the week resident #2 would cover."},
+                "week_new": {"type": "string", "description": "ISO date (YYYY-MM-DD) of resident #1's new week instead."},
+            },
+            "required": ["resident_1", "resident_2", "week_covered", "week_new"],
+        },
+    },
+}
+
+
+def handle_check_assist_swap_message(
+    master_assist,
+    weekly_assist,
+    master_schedule,
+    free_text: str,
+    *,
+    today: dt.date | None = None,
+    client: OllamaClient | None = None,
+) -> CheckHandlingResult:
+    today = today or dt.date.today()
+    resident_names = sorted({d.resident_name for d in master_assist} | {e.resident_name for e in weekly_assist})
+    week_starts = sorted({e.week_start for e in weekly_assist})
+
+    def resolve_args(args: dict) -> tuple[dict | None, str | None]:
+        matches_1 = _match_names(args.get("resident_1"), resident_names)
+        matches_2 = _match_names(args.get("resident_2"), resident_names)
+        if len(matches_1) != 1:
+            return None, f"Resident #1 ({args.get('resident_1')!r}) matched {len(matches_1)} resident(s)."
+        if len(matches_2) != 1:
+            return None, f"Resident #2 ({args.get('resident_2')!r}) matched {len(matches_2)} resident(s)."
+        week_covered = _match_week_start(args.get("week_covered"), week_starts)
+        week_new = _match_week_start(args.get("week_new"), week_starts)
+        if week_covered is None or week_new is None:
+            return None, "Couldn't resolve both weeks against the real assist-list schedule."
+        return {"resident_1": matches_1[0], "resident_2": matches_2[0], "week_covered": week_covered, "week_new": week_new}, None
+
+    def run_check(kwargs: dict) -> AssistSwapCheckResult:
+        return check_assist_swap(
+            kwargs["resident_1"], kwargs["resident_2"], kwargs["week_covered"], kwargs["week_new"],
+            master_assist=master_assist, weekly_assist=weekly_assist, master_schedule=master_schedule,
+        )
+
+    return _run_check_handler(
+        free_text=free_text, today=today, tool_schema=RESOLVE_ASSIST_SWAP_TOOL,
+        resolve_args=resolve_args, run_check=run_check, summarize=_summarize_findings, client=client,
+    )
+
+
+RESOLVE_FSC_REFLECTION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "resolve_fsc_reflection_request",
+        "description": "Resolve a proposed FSC/Reflection day request into the resident, specific date, and portion.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "resident": {"type": "string", "description": "Resident's name, as mentioned by the chief."},
+                "date": {"type": "string", "description": "ISO date (YYYY-MM-DD) of the requested day, within the currently-selected ambulatory week."},
+                "portion": {"type": "string", "enum": ["AM", "PM", "FULL"], "description": "Half-day AM, half-day PM, or a full day."},
+            },
+            "required": ["resident", "date", "portion"],
+        },
+    },
+}
+
+
+def handle_check_fsc_reflection_message(
+    master_schedule,
+    master_assist,
+    ambulatory_week,
+    fsc_balances,
+    free_text: str,
+    *,
+    today: dt.date | None = None,
+    client: OllamaClient | None = None,
+) -> CheckHandlingResult:
+    """Resolves within the currently-selected (already-loaded) ambulatory
+    week — same scope as the structured form's own week dropdown; picking a
+    different week still means picking it from that dropdown first."""
+    today = today or dt.date.today()
+    resident_names = sorted({r.resident_name for r in master_schedule})
+    candidate_dates = sorted({d for row in ambulatory_week for (d, _half) in row.day_parts})
+
+    def resolve_args(args: dict) -> tuple[dict | None, str | None]:
+        matches = _match_names(args.get("resident"), resident_names)
+        if len(matches) != 1:
+            return None, f"Resident ({args.get('resident')!r}) matched {len(matches)} resident(s) in the Master Schedule."
+        date_ = _match_date(args.get("date"), candidate_dates)
+        if date_ is None:
+            return None, "Couldn't resolve that date within the currently-selected ambulatory week."
+        portion = args.get("portion")
+        if portion not in ("AM", "PM", "FULL"):
+            return None, "Couldn't tell if this is a half-day (AM/PM) or full-day request."
+        return {"resident": matches[0], "date": date_, "portion": portion}, None
+
+    def run_check(kwargs: dict) -> FscReflectionDayCheckResult:
+        return check_fsc_reflection_day_request(
+            kwargs["resident"], kwargs["date"], kwargs["portion"],
+            master_schedule=master_schedule, master_assist=master_assist,
+            ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
+        )
+
+    return _run_check_handler(
+        free_text=free_text, today=today, tool_schema=RESOLVE_FSC_REFLECTION_TOOL,
+        resolve_args=resolve_args, run_check=run_check, summarize=_summarize_findings, client=client,
+    )
+
+
+RESOLVE_CLINIC_COVERAGE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "resolve_clinic_coverage_request",
+        "description": "Resolve a preceptor call-out into the preceptor, date, and half-day, within the currently-selected ambulatory week.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "called_out_preceptor": {"type": "string", "description": "Name of the preceptor who called out, as mentioned by the chief."},
+                "date": {"type": "string", "description": "ISO date (YYYY-MM-DD), within the currently-selected ambulatory week."},
+                "half_day": {"type": "string", "enum": ["AM", "PM"]},
+            },
+            "required": ["called_out_preceptor", "date", "half_day"],
+        },
+    },
+}
+
+
+def handle_check_clinic_coverage_message(
+    ambulatory_week,
+    available_clinics,
+    free_text: str,
+    *,
+    today: dt.date | None = None,
+    client: OllamaClient | None = None,
+) -> CheckHandlingResult:
+    """Resolves called_out_preceptor/date/half_day only — candidate
+    preceptor and location are no longer manually entered; this feeds
+    straight into recommend_clinic_coverage() instead of a direct
+    check_clinic_reassignment() call. `result` is a
+    list[RankedClinicCandidate] (possibly empty) rather than a single
+    *CheckResult."""
+    from real_schedule.common import is_preceptor_cell
+
+    today = today or dt.date.today()
+    preceptor_names = sorted(
+        {
+            is_preceptor_cell(cell)[0]
+            for row in ambulatory_week
+            for cell in row.day_parts.values()
+            if is_preceptor_cell(cell) is not None
+        }
+    )
+    valid_day_parts = {(d, h) for row in ambulatory_week for (d, h) in row.day_parts}
+
+    def resolve_args(args: dict) -> tuple[dict | None, str | None]:
+        matches = _match_names(args.get("called_out_preceptor"), preceptor_names)
+        if len(matches) != 1:
+            return None, f"That preceptor ({args.get('called_out_preceptor')!r}) matched {len(matches)} preceptor(s) in this week's ambulatory schedule."
+        try:
+            date_ = dt.date.fromisoformat(args.get("date", ""))
+        except ValueError:
+            return None, "Couldn't resolve that date within the currently-selected ambulatory week."
+        half_day = args.get("half_day")
+        if half_day not in ("AM", "PM") or (date_, half_day) not in valid_day_parts:
+            return None, "Couldn't resolve that date/half-day within the currently-selected ambulatory week."
+        return {"called_out_preceptor": matches[0], "date": date_, "half_day": half_day}, None
+
+    def run_check(kwargs: dict) -> list[RankedClinicCandidate]:
+        return recommend_clinic_coverage(
+            kwargs["called_out_preceptor"], kwargs["date"], kwargs["half_day"],
+            ambulatory_week=ambulatory_week, available_clinics=available_clinics,
+        )
+
+    def summarize(candidates: list[RankedClinicCandidate]) -> str:
+        return json.dumps(
+            [
+                {
+                    "rank": c.rank, "preceptor_name": c.preceptor_name, "location": c.location,
+                    "is_clear": c.is_clear, "same_site_group": c.same_site_group,
+                    "findings": [{"rule": f.rule, "severity": f.severity, "message": f.message} for f in c.findings],
+                }
+                for c in candidates
+            ]
+        )
+
+    return _run_check_handler(
+        free_text=free_text, today=today, tool_schema=RESOLVE_CLINIC_COVERAGE_TOOL,
+        resolve_args=resolve_args, run_check=run_check, summarize=summarize, client=client,
+    )

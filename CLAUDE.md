@@ -106,13 +106,14 @@ recommend_swaps(current_schedule, open_shift, candidates=None) -> list[RankedSwa
 
 ---
 
-## LLM Layer — One Model, Two Prompts
+## LLM Layer — One Model, Three Prompts
 
-A single local instruct model handles all natural-language work. Do **not** maintain separate fine-tuned models for schedule building vs. call-outs.
+A single local instruct model handles all natural-language work. Do **not** maintain separate fine-tuned models for schedule building vs. call-outs vs. the read-only Check tools.
 
 ### What the LLM does
 
 - Parses free-text call-outs ("Sarah is out tomorrow, possibly Thursday — flu")
+- Parses free-text requests for the four real_schedule/ Check tools (assist swap, clinic coverage, FSC/Reflection day, rotation swap)
 - Translates between user intent and solver inputs / outputs
 - Explains why a swap is infeasible (translates solver's infeasibility output into prose)
 - Recommends and ranks candidate swaps/coverage pulls with rationale, on request — not just reactively on call-out
@@ -122,14 +123,15 @@ A single local instruct model handles all natural-language work. Do **not** main
 ### What the LLM must not do
 
 - Generate schedule assignments directly
-- Override solver output
-- Be the final word on whether a swap is legal — always cross-check against `rules.py`
+- Override solver or checker output
+- Be the final word on whether a swap is legal — always cross-check against `rules.py` (DB-backed solvers) or `real_schedule/checks.py` (the read-only Check tools)
 
 ### Prompts
 
 - `llm/prompts/schedule_builder.md` — system prompt for full-schedule UI
 - `llm/prompts/callout_handler.md` — system prompt for call-out UI
-- `llm/tools.py` — function-calling interface to solvers, DB queries, rule explainer
+- `llm/prompts/check_handler.md` — system prompt for the four real_schedule/ Check tools' free-text option
+- `llm/tools.py` — function-calling interface to solvers, DB queries, rule explainer, and the Check tools' real-schedule lookups
 
 ### Fine-tuning posture
 
