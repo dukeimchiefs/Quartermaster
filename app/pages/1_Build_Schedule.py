@@ -1,23 +1,24 @@
 """Page 1 — Build Schedule.
 
-Development Priority #9 (CLAUDE.md): UI over solver/full_schedule.py
-(Priority #8). Reads the live DB, lets the chief tune fairness/preference
-weights and optionally per-resident rotation preferences, then displays the
-proposed year schedule as a pivot table. Like Page 2, this only proposes —
-it writes to audit_log but does not commit anything to assignments; that's
-Page 3 / Priority #10.
+UI over solver/full_schedule.py. Reads the live DB, lets the chief tune
+fairness/preference weights and optionally per-resident rotation
+preferences, then displays the proposed year schedule as a pivot table plus
+a diff against the currently-synced schedule. This page never writes an
+Assignment row — approving just logs the chief's decision to audit_log, the
+same "propose, log the decision, chief updates the real schedule/Epic by
+hand" pattern used everywhere else in this app (Call Out, the Check tools).
 
 llm/prompts/schedule_builder.md (translating free-text intent into
 preferences, explaining infeasibility in prose) is not wired in yet — this
 page is the structured-form step only, matching how Call Out shipped its
-structured form (Priority #4) well before free-text parsing (Priority #6).
+structured form well before free-text parsing.
 
 The built schedule is stored in st.session_state, not just rendered inside
 the "Build schedule" button's if-block: Streamlit reruns the whole script
-on every widget interaction, so a "stage for review" button nested inside
-that block would make the outer condition go false on the very rerun meant
-to handle its click. Only one built schedule is staged at a time; building
-again replaces it.
+on every widget interaction, so a "review" section nested inside that block
+would make the outer condition go false on the very rerun meant to handle
+its click. Only one built schedule is held at a time; building again
+replaces it.
 
 Nests Check Day Off Alignment (formerly its own page) as a sub-section
 above the schedule builder — unchanged logic, just relocated so it lives
@@ -36,7 +37,7 @@ import streamlit as st
 
 from app.auth import get_actor, require_chief_auth
 from audit.log import record as audit_record
-from db.models import Block, Resident, Rotation, TimeOff, get_engine, get_session
+from db.models import Assignment, Block, Resident, Rotation, TimeOff, get_engine, get_session
 from real_schedule.checks import check_day_off_alignment
 from real_schedule.inpatient_schedule import load_inpatient_week_rows
 from real_schedule.roster import RosterIndex, load_roster
@@ -269,6 +270,7 @@ if st.button("Build schedule", type="primary"):
                 for a in schedule.assignments
             ],
         }
+        st.session_state.pop("full_schedule_review_status", None)
 
 built_result = st.session_state.get("built_schedule_result")
 if built_result:
@@ -305,6 +307,73 @@ if built_result:
     load_df = load_df.reindex(sorted(load_df.index))
     st.dataframe(load_df, use_container_width=True)
 
-    if st.button("Stage this schedule for review", type="primary"):
-        st.session_state["pending_full_schedule"] = built_result
-        st.success("Staged — go to Review Changes to approve and commit.")
+    proposed = {(a["resident_id"], a["block_id"]): (a["rotation_id"], a["role"]) for a in built_result["assignments"]}
+    year_block_ids = {b.id for b in roster.blocks if b.year == result_year}
+    with get_session(_engine()) as session:
+        current_assignments = session.query(Assignment).filter(Assignment.block_id.in_(year_block_ids)).all()
+    current = {(a.resident_id, a.block_id): (a.rotation_id, a.role) for a in current_assignments}
+
+    all_keys = set(current) | set(proposed)
+    diff_rows = []
+    for resident_id, block_id in all_keys:
+        current_val = current.get((resident_id, block_id))
+        proposed_val = proposed.get((resident_id, block_id))
+        if current_val == proposed_val:
+            status = "unchanged"
+        elif current_val is None:
+            status = "added"
+        elif proposed_val is None:
+            status = "removed"
+        else:
+            status = "changed"
+        diff_rows.append(
+            {
+                "Resident": residents_by_id[resident_id].name,
+                "Block": blocks_by_id[block_id].block_number,
+                "Current": f"{rotations_by_id[current_val[0]].name} ({current_val[1]})" if current_val else "—",
+                "Proposed": f"{rotations_by_id[proposed_val[0]].name} ({proposed_val[1]})" if proposed_val else "—",
+                "Status": status,
+            }
+        )
+    diff_df = pd.DataFrame(diff_rows).sort_values(["Block", "Resident"])
+    changed_df = diff_df[diff_df["Status"] != "unchanged"]
+
+    st.divider()
+    st.subheader("Review")
+    st.caption(f"{len(changed_df)} of {len(diff_df)} resident-block slots would change ({result_year}).")
+    show_all = st.checkbox("Show unchanged slots too")
+    st.dataframe(diff_df if show_all else changed_df, use_container_width=True, hide_index=True)
+
+    review_status = st.session_state.get("full_schedule_review_status")
+    if review_status:
+        st.info(f"Already recorded as **{review_status}**.")
+    else:
+        st.caption(
+            "This app never writes to the real schedule/Epic — approving here only records the chief's "
+            "decision to the audit log. Update the real Master Schedule yourself."
+        )
+        rev_col1, rev_col2 = st.columns(2)
+        with rev_col1:
+            approve_schedule = st.button("Approve", type="primary", key="approve_full_schedule")
+        with rev_col2:
+            reject_schedule = st.button("Reject", key="reject_full_schedule")
+        if approve_schedule:
+            audit_record(
+                actor=get_actor(),
+                action="approve_full_schedule",
+                reason=f"approved full schedule for year {result_year}",
+                details=json.dumps(
+                    {"year": result_year, "assignment_count": len(proposed), "changed_slots": len(changed_df)}
+                ),
+            )
+            st.session_state["full_schedule_review_status"] = "approved"
+            st.rerun()
+        if reject_schedule:
+            audit_record(
+                actor=get_actor(),
+                action="reject_full_schedule",
+                reason=f"rejected full schedule for year {result_year}",
+                details=json.dumps({"year": result_year, "assignment_count": len(proposed)}),
+            )
+            st.session_state["full_schedule_review_status"] = "rejected"
+            st.rerun()

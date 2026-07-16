@@ -159,11 +159,6 @@ if st.button("Check this FSC/Reflection request", type="primary"):
 
 st.divider()
 st.subheader("Or describe it in your own words")
-st.caption(
-    "Parses free text into the resident, date, and portion via the local assistant, resolved within this "
-    "week's already-loaded ambulatory schedule (pick a different week above first if needed) — then always "
-    "runs the same real_schedule.checks.check_fsc_reflection_day_request() as the form above."
-)
 free_text = st.text_area(
     "What's the request?", placeholder='e.g. "Can Jordan take Thursday afternoon off for reflection day?"',
     key="fsc_reflection_free_text",

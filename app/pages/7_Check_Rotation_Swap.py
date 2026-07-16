@@ -149,10 +149,6 @@ if st.button("Check this rotation swap", type="primary"):
 
 st.divider()
 st.subheader("Or describe it in your own words")
-st.caption(
-    "Parses free text into the two residents and week range via the local assistant, then always runs the "
-    "same real_schedule.checks.check_rotation_swap() as the form above — it never invents a verdict itself."
-)
 free_text = st.text_area("What's the proposed swap?", placeholder='e.g. "Alex and Jamie want to swap block 4"', key="rotation_swap_free_text")
 if st.button("Parse & check"):
     if not free_text.strip():

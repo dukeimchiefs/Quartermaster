@@ -27,7 +27,14 @@ from dataclasses import dataclass, field
 import pytest
 
 from llm.client import DEFAULT_HOST, OllamaClient, RemoteInferenceBlocked
-from llm.tools import call_repair_solver, handle_callout_message, query_schedule_db, recommend_swaps
+from llm.tools import (
+    _ambiguous_match_reply,
+    _match_names,
+    call_repair_solver,
+    handle_callout_message,
+    query_schedule_db,
+    recommend_swaps,
+)
 from solver.repair import CurrentSchedule, OpenShift
 
 
@@ -240,6 +247,44 @@ def test_query_schedule_db_no_match_for_unknown_name(schedule):
 
 def test_query_schedule_db_no_match_outside_block_date_range(schedule):
     assert query_schedule_db(schedule, name="alice", date="2026-09-01") == []
+
+
+# --- llm/tools.py: _match_names / _ambiguous_match_reply ---------------------
+
+
+def test_match_names_resolves_nickname_across_last_first_order():
+    """Regression test for the "Chris Choi" bug: the real roster stores
+    "Last, First" names ("Choi, Christopher"); free text says "Chris Choi"
+    (First Last, and a nickname). A plain substring check finds nothing —
+    token+prefix matching must."""
+    names = ["Choi, Christopher", "Delaney, Christopher", "Gitter, Christopher", "Norberg, Chris"]
+    assert _match_names("Chris Choi", names) == ["Choi, Christopher"]
+
+
+def test_match_names_single_token_can_be_ambiguous():
+    names = ["Choi, Christopher", "Norberg, Chris"]
+    assert _match_names("Chris", names) == ["Choi, Christopher", "Norberg, Chris"]
+
+
+def test_match_names_no_match_returns_empty():
+    assert _match_names("Zzz Nobody", ["Choi, Christopher"]) == []
+
+
+def test_match_names_blank_query_returns_empty():
+    assert _match_names("", ["Choi, Christopher"]) == []
+    assert _match_names(None, ["Choi, Christopher"]) == []
+
+
+def test_ambiguous_match_reply_lists_real_matches_never_invents():
+    reply = _ambiguous_match_reply("resident", "Chris Choi", ["Choi, Christopher", "Choi, Christine"])
+    assert "Choi, Christopher" in reply
+    assert "Choi, Christine" in reply
+
+
+def test_ambiguous_match_reply_zero_matches_says_so_plainly():
+    reply = _ambiguous_match_reply("resident", "Zzz Nobody", [])
+    assert "Zzz Nobody" in reply
+    assert "couldn't find" in reply.lower()
 
 
 # --- llm/tools.py: handle_callout_message ------------------------------------

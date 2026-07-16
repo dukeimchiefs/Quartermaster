@@ -22,10 +22,10 @@ schedule contains:
   even if a later real-schedule snapshot no longer shows it. A resident
   whose real assignment for a block is now "VAC"/"LOA"/jeopardy (see
   real_schedule.common.is_non_committing_label) simply isn't touched that
-  block, rather than removed, to avoid the foreign-key cascade risk
-  Review Changes' own commit path (app/pages/3_Review_Changes.py) already
-  documents for the same reason. A full refresh means starting from a
-  fresh (or wiped) database, same as db.seed's own `init_db` convention.
+  block, rather than removed, to avoid the foreign-key cascade risk of
+  deleting an assignment a committed Swap row still references. A full
+  refresh means starting from a fresh (or wiped) database, same as
+  db.seed's own `init_db` convention.
 - No real rotation-capacity data exists anywhere in Resident_Schedules/, so
   intern_capacity/senior_capacity are set to the *observed* max concurrent
   headcount per rotation/role across all blocks in this sync — non-blocking

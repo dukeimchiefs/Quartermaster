@@ -218,11 +218,6 @@ if st.button("Find candidates", type="primary"):
 
 st.divider()
 st.subheader("Or describe it in your own words")
-st.caption(
-    "Parses free text into the called-out preceptor, date, and half-day via the local assistant, resolved "
-    "within this week's already-loaded ambulatory schedule (pick a different week above first if needed) — "
-    "then always runs the same real_schedule.recommend.recommend_clinic_coverage() as the form above."
-)
 free_text = st.text_area(
     "What happened?", placeholder='e.g. "Dr. Burns is out Wednesday PM, need someone to cover"', key="clinic_coverage_free_text"
 )

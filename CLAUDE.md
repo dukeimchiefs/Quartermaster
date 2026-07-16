@@ -169,7 +169,6 @@ resident-scheduler/
     pages/
       1_Build_Schedule.py
       2_Call_Out.py
-      3_Review_Changes.py
   audit/
     log.py                # append-only audit logger
   tests/

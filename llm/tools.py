@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -500,19 +501,65 @@ def explain_rule_violation(*args, **kwargs):
 # plain Python against the page's already-loaded real_schedule records —
 # never trusted from the model directly. Since there's no DB here, "trusted
 # from the model directly" would mean matching by exact string/date equality
-# against whatever the model wrote; instead, names are resolved by
-# case-insensitive substring match (same convention as query_schedule_db's
-# name lookup above) and dates/weeks are checked for exact membership in the
-# valid set the page already computed — zero or multiple matches is treated
-# as unresolved and re-asked, never guessed.
+# against whatever the model wrote; instead, names are resolved by a
+# tokenized, order-independent match (see _match_names) and dates/weeks are
+# checked for exact membership in the valid set the page already computed —
+# zero or multiple matches is treated as unresolved and re-asked, never
+# guessed.
 # ---------------------------------------------------------------------------
+
+_NAME_TOKEN_RE = re.compile(r"[^,\s]+")
+
+
+def _tokenize_name(name: str) -> list[str]:
+    return [t.lower() for t in _NAME_TOKEN_RE.findall(name)]
 
 
 def _match_names(raw: str | None, valid_names: list[str]) -> list[str]:
-    needle = (raw or "").strip().lower()
-    if not needle:
+    """Tokenizes `raw` and each candidate name (split on comma/whitespace,
+    lowercased) and requires every query token to prefix-match — in either
+    direction — a distinct candidate token. Handles two real problems a
+    plain substring check misses: word-order mismatches ("Chris Choi" vs
+    the roster's "Choi, Christopher" — same class of issue fixed for
+    preceptor names in real_schedule/recommend.py's _same_preceptor), and
+    common English diminutives that are literal prefixes of the formal name
+    ("Chris" -> "Christopher", "Nick" -> "Nicholas", "Sam" -> "Samuel").
+    Not exhaustive — a non-prefix nickname ("Jack" -> "John") still won't
+    match — but a genuine non-match still correctly surfaces as zero
+    results, never a guess."""
+    query_tokens = _tokenize_name(raw or "")
+    if not query_tokens:
         return []
-    return [name for name in valid_names if needle in name.lower()]
+
+    matches = []
+    for name in valid_names:
+        remaining = _tokenize_name(name)
+        if all(_pop_prefix_match(remaining, qt) for qt in query_tokens):
+            matches.append(name)
+    return matches
+
+
+def _pop_prefix_match(remaining_tokens: list[str], query_token: str) -> bool:
+    """True and removes the first token in `remaining_tokens` that
+    prefix-matches `query_token` in either direction; False (no removal) if
+    none does. Each candidate token can only satisfy one query token."""
+    for i, candidate_token in enumerate(remaining_tokens):
+        if candidate_token.startswith(query_token) or query_token.startswith(candidate_token):
+            remaining_tokens.pop(i)
+            return True
+    return False
+
+
+def _ambiguous_match_reply(field_label: str, raw: str | None, matches: list[str]) -> str:
+    """A deterministic, always-grounded message for the zero-or-multiple-
+    match case — never phrased by the model, so it can never invent a
+    distinguishing detail (specialty, program, etc.) that isn't actually in
+    `matches`. See llm/tools.py module notes on the "Chris Choi" bug this
+    replaced: the model, given no real candidate data, fabricated a
+    plausible-sounding but entirely fictitious clarifying question."""
+    if not matches:
+        return f"I couldn't find anyone/anything matching {raw!r} for {field_label} — could you double-check it?"
+    return f"Found {len(matches)} matches for {field_label} ({raw!r}): {', '.join(matches)}. Which one did you mean?"
 
 
 def _match_date(raw: str | None, valid_dates) -> dt.date | None:
@@ -538,11 +585,13 @@ def _match_week_start(raw: str | None, valid_week_starts) -> dt.date | None:
 
 @dataclass
 class CheckHandlingResult:
-    """Result of a handle_check_*_message() call. `reply` is always the
-    model's prose — a clarifying question if resolution failed, otherwise a
-    narration of `result`. `result` is populated only once the deterministic
-    checker actually ran; a None result means "needs more info from the
-    chief," never "checked and found nothing.\""""
+    """Result of a handle_check_*_message() call. `reply` is either a
+    deterministic, Python-authored clarifying message (see
+    _ambiguous_match_reply — grounded in the actual matches found, never
+    phrased by the model) if resolution failed, or the model's narration of
+    `result` once resolution succeeded. `result` is populated only once the
+    deterministic checker actually ran; a None result means "needs more
+    info from the chief," never "checked and found nothing.\""""
 
     reply: str
     resolved: bool
@@ -587,22 +636,15 @@ def _run_check_handler(
         )
 
     resolved_kwargs, error_reply = resolve_args(calls[0].function.arguments)
-    messages.append({"role": "tool", "content": json.dumps(calls[0].function.arguments), "tool_name": tool_name})
 
     if resolved_kwargs is None:
-        clarify = client.chat(
-            messages=messages
-            + [
-                {
-                    "role": "user",
-                    "content": (
-                        f"{error_reply} Ask the chief resident a clarifying question to "
-                        "narrow it down. Do not guess."
-                    ),
-                }
-            ]
-        )
-        return CheckHandlingResult(reply=clarify.message.content or error_reply, resolved=False)
+        # error_reply (built via _ambiguous_match_reply) is already a
+        # complete, grounded message listing the real matches (or plainly
+        # saying there were none) — returned directly, with no further LLM
+        # call, so the model has no opportunity to invent a distinguishing
+        # detail that isn't actually in the data (see llm/tools.py's module
+        # notes on the "Chris Choi" bug this replaced).
+        return CheckHandlingResult(reply=error_reply, resolved=False)
 
     result = run_check(resolved_kwargs)
     summary_text = summarize(result)
@@ -673,9 +715,9 @@ def handle_check_rotation_swap_message(
         matches_1 = _match_names(args.get("resident_1"), resident_names)
         matches_2 = _match_names(args.get("resident_2"), resident_names)
         if len(matches_1) != 1:
-            return None, f"Resident #1 ({args.get('resident_1')!r}) matched {len(matches_1)} resident(s) in the Master Schedule."
+            return None, _ambiguous_match_reply("resident #1", args.get("resident_1"), matches_1)
         if len(matches_2) != 1:
-            return None, f"Resident #2 ({args.get('resident_2')!r}) matched {len(matches_2)} resident(s) in the Master Schedule."
+            return None, _ambiguous_match_reply("resident #2", args.get("resident_2"), matches_2)
         week_first = _match_week_start(args.get("week_start_first"), week_starts)
         week_last = _match_week_start(args.get("week_start_last"), week_starts)
         if week_first is None or week_last is None or week_first > week_last:
@@ -737,9 +779,9 @@ def handle_check_assist_swap_message(
         matches_1 = _match_names(args.get("resident_1"), resident_names)
         matches_2 = _match_names(args.get("resident_2"), resident_names)
         if len(matches_1) != 1:
-            return None, f"Resident #1 ({args.get('resident_1')!r}) matched {len(matches_1)} resident(s)."
+            return None, _ambiguous_match_reply("resident #1", args.get("resident_1"), matches_1)
         if len(matches_2) != 1:
-            return None, f"Resident #2 ({args.get('resident_2')!r}) matched {len(matches_2)} resident(s)."
+            return None, _ambiguous_match_reply("resident #2", args.get("resident_2"), matches_2)
         week_covered = _match_week_start(args.get("week_covered"), week_starts)
         week_new = _match_week_start(args.get("week_new"), week_starts)
         if week_covered is None or week_new is None:
@@ -796,7 +838,7 @@ def handle_check_fsc_reflection_message(
     def resolve_args(args: dict) -> tuple[dict | None, str | None]:
         matches = _match_names(args.get("resident"), resident_names)
         if len(matches) != 1:
-            return None, f"Resident ({args.get('resident')!r}) matched {len(matches)} resident(s) in the Master Schedule."
+            return None, _ambiguous_match_reply("resident", args.get("resident"), matches)
         date_ = _match_date(args.get("date"), candidate_dates)
         if date_ is None:
             return None, "Couldn't resolve that date within the currently-selected ambulatory week."
@@ -866,7 +908,7 @@ def handle_check_clinic_coverage_message(
     def resolve_args(args: dict) -> tuple[dict | None, str | None]:
         matches = _match_names(args.get("called_out_preceptor"), preceptor_names)
         if len(matches) != 1:
-            return None, f"That preceptor ({args.get('called_out_preceptor')!r}) matched {len(matches)} preceptor(s) in this week's ambulatory schedule."
+            return None, _ambiguous_match_reply("the called-out preceptor", args.get("called_out_preceptor"), matches)
         try:
             date_ = dt.date.fromisoformat(args.get("date", ""))
         except ValueError:

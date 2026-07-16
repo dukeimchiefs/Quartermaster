@@ -1,18 +1,18 @@
 """Page 2 — Call Out.
 
-Development Priority #4 (CLAUDE.md): structured form + result display, ahead
-of the LLM-driven free-text path (Priority #6). Reads the live DB, calls
-solver/repair.py, and displays ranked replacement proposals. This page does
-not commit anything — no assignment or call_history row is written here.
-Picking a candidate stages it in st.session_state["pending_swap"] for
-Page 3 (Review Changes) to diff and actually commit (Priority #10); only
-one pending swap is held at a time, choosing a new one replaces it.
+Reads the live DB (a mirror of the real Master Schedule kept current via
+db.sync_real_schedule — not the actual source of truth), calls
+solver/repair.py, and displays ranked replacement proposals. This page never
+writes an Assignment/CallHistory/Swap row — choosing a candidate just logs
+the chief's decision to audit_log, the same "propose, log the decision,
+chief updates the real schedule/Epic by hand" pattern used everywhere else
+in this app (the Check tools, Build Schedule). There's no separate review
+step: picking a candidate *is* the decision.
 
-It writes to audit_log (Priority #7) every time a search actually produces
-(or fails to produce) a proposed swap — CLAUDE.md requires every proposed
-*or* committed change to be logged, not just commits. A free-text message
-that only led to a clarifying question isn't a proposal yet, so those
-aren't logged here.
+It writes to audit_log every time a search actually produces (or fails to
+produce) a proposed swap — CLAUDE.md requires every proposed *or* approved
+change to be logged, not just commits. A free-text message that only led to
+a clarifying question isn't a proposal yet, so those aren't logged here.
 
 Search results are stored in session_state rather than rendered directly
 inside the `if st.button(...)` block: Streamlit reruns the whole script on
@@ -86,17 +86,29 @@ blocks_by_id = {b.id: b for b in schedule.blocks}
 residents_by_id = {r.id: r for r in schedule.residents}
 
 
-def _stage_pending_swap(*, sick_resident_id, open_shift_dict, candidate, source: str) -> None:
-    st.session_state["pending_swap"] = {
-        "source": source,
-        "sick_resident_id": sick_resident_id,
-        "sick_resident_name": residents_by_id[sick_resident_id].name,
-        "chosen_resident_id": candidate["resident_id"],
-        "chosen_resident_name": candidate["resident_name"],
-        "open_shift": open_shift_dict,
-        "reason": candidate["reason"],
-    }
-    st.success(f"Staged {candidate['resident_name']} to cover this shift — go to Review Changes to approve.")
+def _log_swap_decision(*, sick_resident_id, open_shift_dict, candidate, source: str) -> None:
+    sick_name = residents_by_id[sick_resident_id].name
+    chosen_name = candidate["resident_name"]
+    audit_record(
+        actor=get_actor(),
+        action="approve_swap",
+        reason=f"{chosen_name} covers {sick_name}'s {open_shift_dict['shift_type']} on {open_shift_dict['date']}",
+        details=json.dumps(
+            {
+                "source": source,
+                "sick_resident_id": sick_resident_id,
+                "sick_resident_name": sick_name,
+                "chosen_resident_id": candidate["resident_id"],
+                "chosen_resident_name": chosen_name,
+                "open_shift": open_shift_dict,
+                "reason": candidate["reason"],
+            }
+        ),
+    )
+    st.success(
+        f"Recorded — {chosen_name} covers this shift. This app never writes to the real schedule/Epic; "
+        "arrange the actual coverage and update the real record yourself."
+    )
 
 
 sick_resident = st.selectbox(
@@ -219,7 +231,7 @@ if structured_result:
                 st.caption(candidate["reason"])
                 st.metric("Projected rolling-window hours", f"{candidate['projected_window_hours']:.1f}h")
                 if st.button(f"Choose {candidate_resident.name}", key=f"choose_structured_{candidate['resident_id']}"):
-                    _stage_pending_swap(
+                    _log_swap_decision(
                         sick_resident_id=structured_result["sick_resident_id"],
                         open_shift_dict=structured_result["open_shift"],
                         candidate=candidate,
@@ -228,12 +240,6 @@ if structured_result:
 
 st.divider()
 st.subheader("Or describe it in your own words")
-st.caption(
-    "Development Priority #6 (CLAUDE.md). Parses free text into who/when via "
-    "the local assistant, then always runs the same solver as the form above "
-    "— it never invents a candidate itself. Defaults to a 14h night_call "
-    "shift unless you say otherwise."
-)
 free_text = st.text_area(
     "What happened?",
     placeholder='e.g. "Alice is out tomorrow, possibly Thursday too, with the flu"',
@@ -301,7 +307,7 @@ if free_text_result:
                 st.caption(candidate["reason"])
                 st.metric("Projected rolling-window hours", f"{candidate['projected_window_hours']:.1f}h")
                 if st.button(f"Choose {candidate['resident_name']}", key=f"choose_freetext_{candidate['resident_id']}"):
-                    _stage_pending_swap(
+                    _log_swap_decision(
                         sick_resident_id=free_text_result["sick_resident_id"],
                         open_shift_dict=free_text_result["open_shift"],
                         candidate=candidate,

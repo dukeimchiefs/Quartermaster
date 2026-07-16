@@ -99,6 +99,13 @@ def test_rotation_swap_resolves_and_runs_checker():
 
 
 def test_rotation_swap_asks_to_clarify_on_ambiguous_name():
+    """The clarifying reply must be grounded in the real matched names —
+    never phrased by the (fake) model, which here would return "Looks
+    fine." if it were consulted at all. Regression test for the "Chris
+    Choi" bug: the model, given no real candidate data, previously
+    fabricated a plausible-sounding but entirely fictitious clarifying
+    question instead of admitting there was nothing (or too much) to go
+    on."""
     master_schedule = [
         MasterScheduleWeek(resident_name="Chen, Alice", pgy=2, week_start=WEEK_1, rotation="VA GM"),
         MasterScheduleWeek(resident_name="Chen, Andrew", pgy=2, week_start=WEEK_1, rotation="AMB Endo"),
@@ -111,6 +118,31 @@ def test_rotation_swap_asks_to_clarify_on_ambiguous_name():
 
     assert result.resolved is False
     assert result.result is None
+    assert "Chen, Alice" in result.reply
+    assert "Chen, Andrew" in result.reply
+    assert result.reply != "Looks fine."
+
+
+def test_fsc_reflection_resolves_nickname_against_formal_roster_name():
+    """Regression test for the "Chris Choi" bug: free text uses a nickname
+    ("Chris") and first-last word order, while the real roster stores the
+    formal "Last, First" name ("Choi, Christopher"). Must resolve without a
+    clarifying question."""
+    master_schedule = [MasterScheduleWeek(resident_name="Choi, Christopher", pgy=2, week_start=WEEK_1, rotation="AMB Endo")]
+    ambulatory_week = [AmbulatoryWeekRow(resident_name="Choi, Christopher", pgy=2, rotation="AMB Endo", day_parts={(WEEK_1, "AM"): "Dr. X\n(SD)"})]
+    fsc_balances = [FscBalance(resident_name="Choi, Christopher", pgy=2, program="Categorical", base_fsc=4, fsc_available=4, fsc_used=0, fsc_left=4, phase=None)]
+    client = _FakeClientResolves(
+        "resolve_fsc_reflection_request",
+        {"resident": "Chris Choi", "date": "2026-07-06", "portion": "AM"},
+        narration="Eligible.",
+    )
+    result = handle_check_fsc_reflection_message(
+        master_schedule, master_assist=[], ambulatory_week=ambulatory_week, fsc_balances=fsc_balances,
+        free_text="Can Chris Choi take Monday AM off?", today=TODAY, client=client,
+    )
+
+    assert result.resolved is True
+    assert result.reply == "Eligible."
 
 
 def test_rotation_swap_asks_to_clarify_when_model_never_calls_tool():
