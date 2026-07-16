@@ -266,6 +266,21 @@ def test_match_names_single_token_can_be_ambiguous():
     assert _match_names("Chris", names) == ["Choi, Christopher", "Norberg, Chris"]
 
 
+def test_match_names_resolves_non_prefix_nickname():
+    """A non-prefix nickname ("Jack" -> "John", "Bill" -> "William") isn't
+    caught by prefix matching alone — needs the `nicknames` package's
+    curated lookup."""
+    assert _match_names("Jack Smith", ["Smith, John"]) == ["Smith, John"]
+    assert _match_names("Bill Doe", ["Doe, William"]) == ["Doe, William"]
+
+
+def test_match_names_ambiguous_nickname_surfaces_both_real_candidates():
+    """"Jack" is a genuine nickname for both "John" and a literal "Jack" —
+    both real candidates must come back, not a silent pick."""
+    names = ["Smith, John", "Smith, Jack"]
+    assert _match_names("Jack Smith", names) == names
+
+
 def test_match_names_no_match_returns_empty():
     assert _match_names("Zzz Nobody", ["Choi, Christopher"]) == []
 

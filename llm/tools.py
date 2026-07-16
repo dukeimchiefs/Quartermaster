@@ -23,6 +23,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from nicknames import NickNamer
+
 from llm.client import DEFAULT_MODEL, OllamaClient
 from real_schedule.checks import (
     AssistSwapCheckResult,
@@ -100,6 +102,15 @@ QUERY_SCHEDULE_DB_TOOL = {
 
 DEFAULT_SHIFT_TYPE = "night_call"
 DEFAULT_SHIFT_HOURS = 14.0
+
+# Extraction/tool-calling turns (deciding which tool to call, extracting
+# structured fields) run at temperature 0 — fully deterministic, no room for
+# creative drift. Narration turns (writing prose from data the model's
+# already been handed) run at a low but nonzero temperature: some natural
+# phrasing variation is fine, but low enough to keep embellishment risk down
+# — narration is still an LLM generating text, not a lookup, even when
+# every fact it's handed is real.
+_NARRATION_TEMPERATURE = 0.2
 
 _NARRATIVE_SCHEMA = {
     "type": "object",
@@ -301,6 +312,7 @@ def handle_callout_message(
                     ),
                 }
             ],
+            options={"temperature": _NARRATION_TEMPERATURE},
         )
         return CalloutHandlingResult(
             reply=clarify.message.content or "Could you clarify who's out and on what date?",
@@ -353,6 +365,7 @@ def handle_callout_message(
                 }
             ],
             format=_NARRATIVE_SCHEMA,
+            options={"temperature": _NARRATION_TEMPERATURE},
         )
         parsed = json.loads(narration.message.content)
         narratives = {n["resident_id"]: n["narrative"] for n in parsed["narratives"] if n["resident_id"] in valid_ids}
@@ -424,7 +437,7 @@ def recommend_swaps(
     client = client or OllamaClient(model=DEFAULT_MODEL)
 
     if tool_result is None:
-        response = client.chat(messages=messages, tools=[CALL_REPAIR_SOLVER_TOOL])
+        response = client.chat(messages=messages, tools=[CALL_REPAIR_SOLVER_TOOL], options={"temperature": 0})
         messages.append(response.message.model_dump())
 
         for call in response.message.tool_calls or []:
@@ -470,6 +483,7 @@ def recommend_swaps(
                 }
             ],
             format=_NARRATIVE_SCHEMA,
+            options={"temperature": _NARRATION_TEMPERATURE},
         )
         parsed = json.loads(narration_response.message.content)
         narratives = {n["resident_id"]: n["narrative"] for n in parsed["narratives"] if n["resident_id"] in valid_ids}
@@ -509,6 +523,7 @@ def explain_rule_violation(*args, **kwargs):
 # ---------------------------------------------------------------------------
 
 _NAME_TOKEN_RE = re.compile(r"[^,\s]+")
+_NICKNAMER = NickNamer()
 
 
 def _tokenize_name(name: str) -> list[str]:
@@ -517,16 +532,19 @@ def _tokenize_name(name: str) -> list[str]:
 
 def _match_names(raw: str | None, valid_names: list[str]) -> list[str]:
     """Tokenizes `raw` and each candidate name (split on comma/whitespace,
-    lowercased) and requires every query token to prefix-match — in either
-    direction — a distinct candidate token. Handles two real problems a
-    plain substring check misses: word-order mismatches ("Chris Choi" vs
-    the roster's "Choi, Christopher" — same class of issue fixed for
-    preceptor names in real_schedule/recommend.py's _same_preceptor), and
-    common English diminutives that are literal prefixes of the formal name
-    ("Chris" -> "Christopher", "Nick" -> "Nicholas", "Sam" -> "Samuel").
-    Not exhaustive — a non-prefix nickname ("Jack" -> "John") still won't
-    match — but a genuine non-match still correctly surfaces as zero
-    results, never a guess."""
+    lowercased) and requires every query token to match — in either
+    direction — a distinct candidate token, by prefix or by nickname
+    equivalence (via the `nicknames` package's curated dataset). Handles
+    three real problems a plain substring check misses: word-order
+    mismatches ("Chris Choi" vs the roster's "Choi, Christopher" — same
+    class of issue fixed for preceptor names in real_schedule/recommend.py's
+    _same_preceptor); diminutives that are literal prefixes of the formal
+    name ("Nick" -> "Nicholas"); and non-prefix nicknames a prefix check
+    alone can't catch ("Jack" -> "John", "Bill" -> "William"). A genuinely
+    unrecognized name still correctly surfaces as zero results, never a
+    guess — and a broadly ambiguous nickname (e.g. "Chris" is short for
+    several different formal names) correctly surfaces as multiple matches
+    to ask about, rather than silently picking one."""
     query_tokens = _tokenize_name(raw or "")
     if not query_tokens:
         return []
@@ -534,17 +552,28 @@ def _match_names(raw: str | None, valid_names: list[str]) -> list[str]:
     matches = []
     for name in valid_names:
         remaining = _tokenize_name(name)
-        if all(_pop_prefix_match(remaining, qt) for qt in query_tokens):
+        if all(_pop_token_match(remaining, qt) for qt in query_tokens):
             matches.append(name)
     return matches
 
 
-def _pop_prefix_match(remaining_tokens: list[str], query_token: str) -> bool:
-    """True and removes the first token in `remaining_tokens` that
-    prefix-matches `query_token` in either direction; False (no removal) if
-    none does. Each candidate token can only satisfy one query token."""
+def _tokens_are_equivalent(query_token: str, candidate_token: str) -> bool:
+    if candidate_token.startswith(query_token) or query_token.startswith(candidate_token):
+        return True
+    if candidate_token in _NICKNAMER.canonicals_of(query_token):
+        return True
+    if query_token in _NICKNAMER.canonicals_of(candidate_token):
+        return True
+    return False
+
+
+def _pop_token_match(remaining_tokens: list[str], query_token: str) -> bool:
+    """True and removes the first token in `remaining_tokens` equivalent to
+    `query_token` (prefix or nickname match, see _tokens_are_equivalent);
+    False (no removal) if none is. Each candidate token can only satisfy one
+    query token."""
     for i, candidate_token in enumerate(remaining_tokens):
-        if candidate_token.startswith(query_token) or query_token.startswith(candidate_token):
+        if _tokens_are_equivalent(query_token, candidate_token):
             remaining_tokens.pop(i)
             return True
     return False
@@ -661,7 +690,8 @@ def _run_check_handler(
                     "finding."
                 ),
             }
-        ]
+        ],
+        options={"temperature": _NARRATION_TEMPERATURE},
     )
     return CheckHandlingResult(
         reply=narration.message.content or summary_text,

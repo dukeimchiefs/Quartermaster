@@ -59,3 +59,13 @@ pandas>=2.0
 # enforcement mechanism for "never write to Resident_Schedules/", verified
 # by tests/test_real_schedule_never_writes.py, not just a comment.
 openpyxl>=3.1
+
+# Audited 2026-07-16 (see CLAUDE.md's dependency guardrail): nicknames
+# (checked v1.0.1) has zero network-related code and zero dependencies of
+# its own — grepping the installed package tree for urllib/requests/
+# socket/http.client/httpx imports returns no matches. It's a pure lookup
+# over a bundled names.csv file (read via importlib.resources), used by
+# llm/tools.py's free-text name resolver to close the gap prefix-matching
+# alone can't ("Jack" -> "John", "Bill" -> "William" aren't literal
+# prefixes of the formal name, unlike "Chris" -> "Christopher").
+nicknames>=1.0

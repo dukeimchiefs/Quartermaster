@@ -30,6 +30,13 @@ from urllib.parse import urlparse
 import ollama
 
 DEFAULT_MODEL = "llama3.1:8b"
+"""If tool-calling reliability or hallucination issues keep showing up
+despite grounding fixes and low narration temperature (see llm/tools.py's
+_NARRATION_TEMPERATURE), CLAUDE.md names Qwen 2.5 14B as the fallback model
+to try — larger models generally follow tool-calling instructions more
+reliably, at the cost of slower responses and more RAM on the workstation.
+Not switched by default; `ollama pull` the tag first if you do."""
+
 DEFAULT_HOST = "http://127.0.0.1:11434"
 
 _LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
